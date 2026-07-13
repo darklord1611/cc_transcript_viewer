@@ -19,6 +19,7 @@ import mimetypes
 import multiprocessing
 import os
 import re
+import sys
 import threading
 from concurrent.futures import ProcessPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +45,18 @@ LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 # 127.0.0.1 still sends `Host: evil.com`, which we reject. Disabled when the
 # user deliberately binds a non-loopback --host (they've opted into exposure).
 HOST_CHECK = True
+
+# Extra hostnames accepted in the Host header, named one by one via
+# --allowed-host. This is for a *trusted reverse proxy* in front of the loopback
+# server — a cloud IDE's port forwarder, an SSH tunnel with a hostname, etc. Such
+# a proxy connects over loopback (so the socket needn't be exposed), but forwards
+# the browser's original `Host: <public-name>`, which the allowlist would
+# otherwise refuse. Naming that one host keeps the guard live for every other
+# name, which is why this exists instead of telling people to bind 0.0.0.0 (that
+# turns HOST_CHECK off entirely and opens the port to the network).
+ALLOWED_HOSTS: set[str] = set()
+# Hosts we've already complained about, so the hint prints once each, not per request.
+_REJECTED_HOSTS: set[str] = set()
 
 # Set by main() so handlers can reach it.
 PROJECTS_DIR = DEFAULT_PROJECTS_DIR
@@ -1311,7 +1324,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _host_allowed(self) -> bool:
-        """True if the request's Host header names this loopback server.
+        """True if the request's Host header names this loopback server, or a
+        proxy hostname the user explicitly trusted with --allowed-host.
 
         The Host reflects the hostname in the URL the client used; an attacker
         who rebinds DNS to 127.0.0.1 cannot change it away from their domain.
@@ -1325,11 +1339,29 @@ class Handler(BaseHTTPRequestHandler):
             hostname = host.rsplit(":", 1)[0]
         else:
             hostname = host
-        return hostname in LOOPBACK_HOSTS
+        hostname = hostname.lower()         # Host names are case-insensitive.
+        return hostname in LOOPBACK_HOSTS or hostname in ALLOWED_HOSTS
+
+    def _reject_host(self) -> None:
+        """403 a request whose Host isn't allowed, naming the fix once per host.
+
+        Without this the rejection is silent (log_message is suppressed), and a
+        legitimate proxy setup looks like the server is simply broken.
+        """
+        host = self.headers.get("Host", "")
+        if host not in _REJECTED_HOSTS:
+            _REJECTED_HOSTS.add(host)
+            name = host.rsplit(":", 1)[0] if ":" in host else host
+            print(
+                f"  refused a request with Host: {host or '(none)'}\n"
+                f"  if that is your own proxy, restart with --allowed-host {name or 'HOSTNAME'}",
+                file=sys.stderr,
+            )
+        self.send_error(403, "Host not allowed")
 
     def do_GET(self):
         if HOST_CHECK and not self._host_allowed():
-            self.send_error(403, "Host not allowed")
+            self._reject_host()
             return
 
         parsed = urlparse(self.path)
@@ -1407,7 +1439,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         if HOST_CHECK and not self._host_allowed():
-            self.send_error(403, "Host not allowed")
+            self._reject_host()
             return
 
         if urlparse(self.path).path != "/api/session-name":
@@ -1455,10 +1487,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global PROJECTS_DIR, CUSTOM_NAMES_FILE, HOST_CHECK
+    global PROJECTS_DIR, CUSTOM_NAMES_FILE, HOST_CHECK, ALLOWED_HOSTS
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", type=int, default=3132)
     ap.add_argument("--host", default=DEFAULT_HOST)
+    ap.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        metavar="HOSTNAME",
+        help="also accept this hostname in the Host header (repeatable). Use when a "
+             "trusted reverse proxy (e.g. a cloud IDE port forwarder) reaches the "
+             "loopback server but forwards the browser's own Host. Keeps the "
+             "DNS-rebinding guard on for every other hostname.",
+    )
     ap.add_argument("--projects-dir", type=Path, default=DEFAULT_PROJECTS_DIR)
     ap.add_argument("--codex-home", type=Path, default=codex.DEFAULT_CODEX_HOME)
     ap.add_argument(
@@ -1482,6 +1524,7 @@ def main():
     # Enforce the Host allowlist only on the safe loopback default; if the user
     # deliberately binds elsewhere for LAN access, step aside so it still works.
     HOST_CHECK = args.host in LOOPBACK_HOSTS
+    ALLOWED_HOSTS = {h.strip().lower() for h in args.allowed_host if h.strip()}
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
@@ -1490,6 +1533,8 @@ def main():
     print(f"  codex sessions:  {codex.SESSIONS_DIR}")
     print(f"  cursor db:       {cursor.DB_PATH}")
     print(f"  serving at:      {url}")
+    if ALLOWED_HOSTS:
+        print(f"  also accepting:  {', '.join(sorted(ALLOWED_HOSTS))} (via --allowed-host)")
     print("  (Ctrl-C to stop)")
     try:
         server.serve_forever()
