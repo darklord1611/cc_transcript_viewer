@@ -34,6 +34,7 @@ Options:
 ```bash
 python3 server.py --port 8080            # use a different port
 python3 server.py --host 0.0.0.0         # listen on all interfaces (LAN access — opt-in)
+python3 server.py --allowed-host NAME    # also accept this Host header (trusted proxy — see below)
 python3 server.py --projects-dir PATH    # different Claude Code projects directory
 python3 server.py --codex-home PATH      # different Codex home (default ~/.codex)
 python3 server.py --cursor-db PATH       # different Cursor state.vscdb (or its Cursor app-support dir)
@@ -42,6 +43,22 @@ python3 server.py --custom-names-file PATH # different custom transcript names f
 
 By default the server binds **127.0.0.1** (loopback only), so it isn't reachable from other machines
 unless you deliberately pass `--host 0.0.0.0`.
+
+### Behind a proxy (cloud IDE / remote dev box)
+
+If you run the viewer on a remote machine and reach it through a port forwarder (a cloud IDE's
+web preview, an SSH tunnel with a hostname), the forwarder connects over loopback but passes along
+your browser's original `Host`, which the rebinding guard refuses with **403 Host not allowed**. Name
+that hostname instead of opening the server up:
+
+```bash
+python3 server.py --allowed-host my-box.example.dev
+```
+
+The server stays bound to `127.0.0.1` — so only the local forwarder can reach it — and the guard keeps
+rejecting every hostname you didn't name. Prefer this over `--host 0.0.0.0`, which exposes the port to
+the network *and* switches the guard off entirely. Whatever you put in front of it must do the
+authentication: the viewer has none, so anyone who can reach the URL can read every transcript.
 
 The viewer **auto-refreshes**: while the **● Live** toggle (top of the sidebar) is on — the default —
 it polls about once a second and updates the sidebar **and the open transcript in place** as sessions
@@ -126,9 +143,10 @@ This app reads your private transcripts, so it's built to keep them on your mach
   (inbound), with no HTTP client, sockets, mail, or telemetry anywhere. Nothing is ever uploaded.
 - **Loopback by default.** It binds `127.0.0.1`; LAN exposure requires an explicit `--host 0.0.0.0`.
 - **DNS-rebinding guard.** While bound to loopback, it enforces a `Host`-header allowlist
-  (`127.0.0.1` / `localhost`), so a malicious web page that rebinds its domain to `127.0.0.1` can't
-  read your transcripts through the browser — its requests still carry `Host: evil.com` and get a
-  `403`. (Skipped when you deliberately bind a non-loopback `--host`.)
+  (`127.0.0.1` / `localhost`, plus any hostname you explicitly pass to `--allowed-host`), so a
+  malicious web page that rebinds its domain to `127.0.0.1` can't read your transcripts through the
+  browser — its requests still carry `Host: evil.com` and get a `403`. (Skipped when you deliberately
+  bind a non-loopback `--host`.)
 - **Transcript reads are confined.** `/api/session` only parses files under the transcript roots
   (`~/.claude/projects`, `~/.codex`), or a Cursor conversation addressed by the `cursordb:<id>` scheme
   (read from the local `state.vscdb` by id, never an arbitrary path); anything else returns `403`.

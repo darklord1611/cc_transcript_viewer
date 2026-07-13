@@ -517,6 +517,34 @@ class SecurityTest(unittest.TestCase):
         self.assertEqual(self.request_with_host("/api/sessions", "localhost:1234"), 200)
         self.assertEqual(self.request_with_host("/api/sessions", "127.0.0.1"), 200)
 
+    def test_explicitly_allowed_host_is_accepted(self):
+        """--allowed-host lets a named proxy through without opening the guard.
+
+        The point of the flag is that it admits exactly the hostname you name and
+        nothing else, so a rebinding attacker is still refused while the request
+        is in flight from a trusted forwarder.
+        """
+        server.ALLOWED_HOSTS = {"studio.example.test"}
+        try:
+            self.assertEqual(
+                self.request_with_host("/api/sessions", "studio.example.test"), 200
+            )
+            # Case-insensitive, per the Host header spec, and port-tolerant.
+            self.assertEqual(
+                self.request_with_host("/api/sessions", "STUDIO.example.test:443"), 200
+            )
+            # Everything not named is still refused.
+            self.assertEqual(self.request_with_host("/api/sessions", "evil.com"), 403)
+            self.assertEqual(
+                self.request_with_host("/api/sessions", "other.example.test"), 403
+            )
+        finally:
+            server.ALLOWED_HOSTS = set()
+
+    def test_allowed_hosts_is_empty_by_default(self):
+        """Nothing but loopback is admitted unless the user names a host."""
+        self.assertEqual(server.ALLOWED_HOSTS, set())
+
 
 if __name__ == "__main__":
     unittest.main()
