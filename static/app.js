@@ -299,6 +299,9 @@ let CONTENT_MATCHES = null;
 // Selected values for the dropdown filters; empty set = no constraint (all).
 const SELECTED_MODELS = new Set();
 const SELECTED_DIRS = new Set();
+// Selected pod/team values (mirror mode only); empty set = all.
+const SELECTED_TEAMS = new Set();
+const SELECTED_PODS = new Set();
 // Parent session file keys whose linked subagent subtrees are hidden.
 // Kept outside renderSidebar so live polling does not reopen collapsed groups.
 const COLLAPSED_SUBAGENT_PARENTS = new Set();
@@ -429,6 +432,22 @@ function buildFilters() {
     host.append(makeDropdown("Model", modelGroups, SELECTED_MODELS, () => renderSidebar($("#search").value)));
   }
 
+  // ----- teams (mirror mode: red/blue/green auditing roles) -----
+  const teams = [...new Set(SESSIONS.map((s) => s.team).filter(Boolean))].sort();
+  for (const v of [...SELECTED_TEAMS]) if (!teams.includes(v)) SELECTED_TEAMS.delete(v);
+  if (teams.length) {
+    const items = teams.map((t) => ({ value: t, label: t }));
+    host.append(makeDropdown("Team", [{ label: "", items }], SELECTED_TEAMS, () => renderSidebar($("#search").value)));
+  }
+
+  // ----- pods (mirror mode: one per RunPod pod) -----
+  const pods = [...new Set(SESSIONS.map((s) => s.pod).filter(Boolean))].sort();
+  for (const v of [...SELECTED_PODS]) if (!pods.includes(v)) SELECTED_PODS.delete(v);
+  if (pods.length) {
+    const items = pods.map((p) => ({ value: p, label: p }));
+    host.append(makeDropdown("Pod", [{ label: "", items }], SELECTED_PODS, () => renderSidebar($("#search").value)));
+  }
+
   // ----- directories (flat) -----
   const dirs = [...new Set(SESSIONS.map((s) => s.cwd).filter(Boolean))].sort();
   for (const v of [...SELECTED_DIRS]) if (!dirs.includes(v)) SELECTED_DIRS.delete(v);
@@ -447,6 +466,8 @@ function renderSidebar(query) {
     if (AGENT_FILTER !== "all" && s.agent !== AGENT_FILTER) return false;
     if (SELECTED_MODELS.size && !SELECTED_MODELS.has(s.model || "")) return false;
     if (SELECTED_DIRS.size && !SELECTED_DIRS.has(s.cwd || "")) return false;
+    if (SELECTED_TEAMS.size && !SELECTED_TEAMS.has(s.team || "")) return false;
+    if (SELECTED_PODS.size && !SELECTED_PODS.has(s.pod || "")) return false;
     if (!q) return true;
     const metaHit = (
       s.title + " " + (s.original_title || "") + " " + (s.ai_title || "") + " " +
@@ -529,6 +550,9 @@ function renderSidebar(query) {
         "div",
         { class: "session-toprow" },
         el("span", { class: "agent-tag agent-" + s.agent }, agentLabel(s.agent)),
+        s.team
+          ? el("span", { class: "team-tag team-" + s.team, title: "Team " + s.team + (s.pod ? " · pod " + s.pod : "") }, s.team)
+          : (s.pod ? el("span", { class: "team-tag team-unknown", title: "Pod " + s.pod }, s.pod) : null),
         s.is_subagent
           ? el("span", { class: "sidechain-tag" }, s.subagent_type === "guardian" ? "guardian" : "sub-agent")
           : null,

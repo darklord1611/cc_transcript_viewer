@@ -511,6 +511,17 @@ body.outline-collapsed #nav-buttons { right: 24px; }
 .agent-codex { background: #141414; color: #fff; }
 .agent-cursor { background: #4a6fa5; color: #fff; }
 .t-title .agent-tag { vertical-align: middle; margin-right: 8px; font-size: 11px; }
+/* Mirror-mode auditing-team badge (red/blue/green), styled like the agent tag. */
+.team-tag {
+  flex: none;
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  padding: 2px 6px; border-radius: 5px; line-height: 1.4;
+  background: var(--bg); border: 1px solid var(--border); color: var(--fg);
+}
+.team-red { background: #c0392b; color: #fff; border-color: transparent; }
+.team-blue { background: #2563a8; color: #fff; border-color: transparent; }
+.team-green { background: #2e7d4f; color: #fff; border-color: transparent; }
+.t-title .team-tag { vertical-align: middle; margin-right: 8px; font-size: 11px; }
 .session-meta {
   margin-top: 4px; font-size: 11px; color: var(--muted);
   display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
