@@ -11,6 +11,16 @@
       "key": "~/.ssh/id_ed25519"
     },
     {
+      "id": "red-qa-v1",
+      "team": "red",
+      "game": "domain code",
+      "label": "red \u00b7 qa-v1",
+      "host": "POD_PUBLIC_IP",
+      "port": 22222,
+      "user": "root",
+      "key": "~/.ssh/id_ed25519"
+    },
+    {
       "id": "blue-domain-code",
       "team": "blue",
       "game": "domain code",
