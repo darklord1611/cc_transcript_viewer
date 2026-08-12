@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlparse
 import claude_parser as claude
 import codex_parser as codex
 import cursor_parser as cursor
+import mirror
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_CUSTOM_NAMES_FILE = (
@@ -189,19 +190,27 @@ def save_summary_caches() -> None:
 # Unified session list / dispatch
 # ---------------------------------------------------------------------------
 def list_sessions() -> list[dict]:
-    """Flat list of every Claude Code, Codex, and Cursor session, newest first."""
+    """Flat list of every Claude Code, Codex, and Cursor session, newest first.
+
+    In mirror mode the sources are the per-pod transcript trees under the mirror
+    (see mirror.py); the hub's own local transcripts are intentionally excluded
+    so the list is only the pods being overseen.
+    """
     load_summary_caches()
-    out: list[dict] = claude.list_sessions()
+    if mirror.enabled():
+        out: list[dict] = mirror.collect()
+    else:
+        out = claude.list_sessions()
 
-    try:
-        out.extend(codex.list_sessions())
-    except Exception:  # noqa: BLE001 — never let Codex errors hide CC sessions
-        pass
+        try:
+            out.extend(codex.list_sessions())
+        except Exception:  # noqa: BLE001 — never let Codex errors hide CC sessions
+            pass
 
-    try:
-        out.extend(cursor.list_sessions())
-    except Exception:  # noqa: BLE001 — never let Cursor errors hide other sessions
-        pass
+        try:
+            out.extend(cursor.list_sessions())
+        except Exception:  # noqa: BLE001 — never let Cursor errors hide other sessions
+            pass
 
     save_summary_caches()
 
@@ -246,6 +255,8 @@ def parse_session(target: Path) -> dict | None:
 
     Returns None if the file is outside every allowed root.
     """
+    if mirror.enabled():
+        return mirror.parse(target)
     if _under(target, claude.PROJECTS_DIR):
         return claude.parse_session(target)
     if _under(target, codex.SESSIONS_DIR) or (
@@ -289,15 +300,20 @@ def resolve_transcript_file(file_id: str) -> Path:
     target = Path(file_id).expanduser().resolve()
     if not target.exists():
         raise FileNotFoundError(file_id)
-    allowed = (
-        _under(target, claude.PROJECTS_DIR)
-        or _under(target, codex.SESSIONS_DIR)
-        or (
-            codex.ARCHIVED_SESSIONS_DIR.exists()
-            and _under(target, codex.ARCHIVED_SESSIONS_DIR)
+    if mirror.enabled():
+        # Mirror mode confines reads to the mirrored pod trees instead of the
+        # hub's own local transcript roots.
+        allowed = mirror.owns(target)
+    else:
+        allowed = (
+            _under(target, claude.PROJECTS_DIR)
+            or _under(target, codex.SESSIONS_DIR)
+            or (
+                codex.ARCHIVED_SESSIONS_DIR.exists()
+                and _under(target, codex.ARCHIVED_SESSIONS_DIR)
+            )
+            or cursor.is_cli_transcript(target)
         )
-        or cursor.is_cli_transcript(target)
-    )
     if not allowed:
         raise PermissionError(file_id)
     return target
@@ -851,6 +867,13 @@ def main():
         default=cursor.DEFAULT_CHATS_DIR,
         help="Cursor chats dir containing per-session store.db (default ~/.cursor/chats)",
     )
+    ap.add_argument(
+        "--mirror",
+        type=Path,
+        default=None,
+        help="oversee many pods: read per-pod transcript trees under this mirror "
+        "dir (populated by collector.py) instead of the local machine's own",
+    )
     args = ap.parse_args()
 
     CUSTOM_NAMES_FILE = args.custom_names_file.expanduser()
@@ -861,6 +884,7 @@ def main():
         projects_dir=args.cursor_projects_dir,
         chats_dir=args.cursor_chats_dir,
     )
+    mirror.configure(args.mirror)
     # Enforce the Host allowlist only on the safe loopback default; if the user
     # deliberately binds elsewhere for LAN access, step aside so it still works.
     HOST_CHECK = args.host in LOOPBACK_HOSTS
@@ -868,11 +892,15 @@ def main():
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
     print("Claude Code + Codex + Cursor transcript browser")
-    print(f"  claude projects: {claude.PROJECTS_DIR}")
-    print(f"  codex sessions:  {codex.SESSIONS_DIR}")
-    print(f"  cursor db:       {cursor.DB_PATH}")
-    print(f"  cursor projects: {cursor.PROJECTS_DIR}")
-    print(f"  cursor chats:    {cursor.CHATS_DIR}")
+    if mirror.enabled():
+        print(f"  mirror mode:     {mirror.MIRROR_DIR}")
+        print(f"  pods overseen:   {len(mirror._pods())}")
+    else:
+        print(f"  claude projects: {claude.PROJECTS_DIR}")
+        print(f"  codex sessions:  {codex.SESSIONS_DIR}")
+        print(f"  cursor db:       {cursor.DB_PATH}")
+        print(f"  cursor projects: {cursor.PROJECTS_DIR}")
+        print(f"  cursor chats:    {cursor.CHATS_DIR}")
     print(f"  serving at:      {url}")
     print("  (Ctrl-C to stop)")
     try:
