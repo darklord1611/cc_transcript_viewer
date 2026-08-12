@@ -138,12 +138,15 @@ def sync_pod(pod: dict, mirror: Path) -> str:
     live = mirror / pod_id
     got = []
 
-    # Claude Code: <claude_path> -> <pod>/claude/projects
+    # Claude Code: <claude_path> -> <pod>/claude/projects. Probe first so a pod
+    # whose agent hasn't written yet reports "no transcripts" quietly instead of
+    # a tar failure.
     claude_path = pod.get("claude_path", DEFAULT_CLAUDE_PATH)
-    c_parent, c_name = _remote_split(claude_path)
-    if _pull_tree(pod, c_parent, [c_name], staging / "claude"):
-        _publish(staging / "claude", live / "claude")
-        got.append("claude")
+    if _remote_existing(pod, [claude_path]):
+        c_parent, c_name = _remote_split(claude_path)
+        if _pull_tree(pod, c_parent, [c_name], staging / "claude"):
+            _publish(staging / "claude", live / "claude")
+            got.append("claude")
 
     # Codex: <codex_home>/{sessions,archived_sessions} -> <pod>/codex/...
     codex_home = pod.get("codex_home", DEFAULT_CODEX_HOME)

@@ -21,7 +21,7 @@ python3 server.py --codex-home PATH    # override Codex home (default ~/.codex)
 python3 server.py --cursor-db PATH     # override Cursor state.vscdb (or its app-support dir)
 
 # Tests (stdlib unittest only; no linter/formatter config and no CI in the repo)
-python3 -m unittest test_security test_summary_cache test_parsers test_event_schema test_mirror  # full suite
+python3 -m unittest test_security test_summary_cache test_parsers test_event_schema test_mirror test_auth  # full suite
 python3 -m unittest test_parsers                                                     # one module
 python3 -m unittest test_security.SecurityTest.test_runtime_makes_no_outbound_connections  # one test
 ```
@@ -127,9 +127,21 @@ mirror mode the allowed-root check (`resolve_transcript_file`) confines reads to
 the mirrored pod trees via `mirror.owns()`. `test_mirror.py` covers tagging and
 confinement.
 
-Known Phase-2 gaps: images referenced by absolute pod paths don't resolve on the
-hub (the file lives on the pod), and there's no auth yet — the public-endpoint
-token gate is Phase 3.
+### Auth (public-endpoint token gate)
+
+`--auth-token <t>` / `CC_VIEWER_TOKEN` env turns on a shared-secret gate so the
+viewer can be exposed on a public `--host`. When set, `Handler._guard()` (called
+by every verb) requires the token via `Authorization: Bearer`, `X-Auth-Token`,
+`?token=`, or the `cc_auth` cookie; the index page, visited once as
+`…/?token=<t>`, sets that HttpOnly/SameSite=Strict cookie so the SPA's `/api/*`
+fetches authenticate without the token in every URL. Comparison is
+`hmac.compare_digest`. Auth is orthogonal to the loopback Host-header guard
+(`HOST_CHECK`): both can apply. The server prints a warning if bound
+non-loopback with no token, and the intended TLS story is RunPod's HTTPS proxy in
+front (the app speaks plain HTTP behind it). `test_auth.py` covers the gate.
+
+Known gap: images referenced by absolute pod paths don't resolve on the hub (the
+file lives on the pod) — a collector addition for later.
 
 ## Fragility to be aware of
 

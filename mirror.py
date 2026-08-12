@@ -78,7 +78,8 @@ def _pods() -> list[dict]:
         return []
     pods: list[dict] = []
     for pod_dir in sorted(MIRROR_DIR.iterdir()):
-        if not pod_dir.is_dir():
+        # Skip non-dirs and dot-dirs (e.g. the collector's .staging scratch area).
+        if not pod_dir.is_dir() or pod_dir.name.startswith("."):
             continue
         meta: dict = {}
         meta_file = pod_dir / "pod.json"

@@ -9,6 +9,26 @@
       "port": 22222,
       "user": "root",
       "key": "~/.ssh/id_ed25519"
+    },
+    {
+      "id": "blue-domain-code",
+      "team": "blue",
+      "game": "domain code",
+      "label": "blue \u00b7 domain code",
+      "host": "POD_PUBLIC_IP",
+      "port": 22222,
+      "user": "root",
+      "key": "~/.ssh/id_ed25519"
+    },
+    {
+      "id": "green-domain-code",
+      "team": "green",
+      "game": "domain code",
+      "label": "green \u00b7 domain code",
+      "host": "POD_PUBLIC_IP",
+      "port": 22222,
+      "user": "root",
+      "key": "~/.ssh/id_ed25519"
     }
   ]
 }
