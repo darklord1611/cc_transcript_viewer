@@ -21,12 +21,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import mimetypes
 import os
 import subprocess
 import sys
 import threading
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -51,6 +53,14 @@ LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 # 127.0.0.1 still sends `Host: evil.com`, which we reject. Disabled when the
 # user deliberately binds a non-loopback --host (they've opted into exposure).
 HOST_CHECK = True
+
+# Optional shared-secret auth (set in main() from --auth-token / CC_VIEWER_TOKEN).
+# When set, every route requires the token — supplied as `Authorization: Bearer`,
+# an `X-Auth-Token` header, a `?token=` query param, or the cookie the index page
+# sets after a tokened first visit. This is what makes a public bind safe to
+# expose; it is orthogonal to the loopback Host-header guard above.
+AUTH_TOKEN: str | None = None
+AUTH_COOKIE = "cc_auth"
 
 # Set by main() so handlers can reach it.
 CUSTOM_NAMES_FILE = DEFAULT_CUSTOM_NAMES_FILE
@@ -591,7 +601,7 @@ class Handler(BaseHTTPRequestHandler):
             # reload/navigation. There is no client left to receive an error.
             self.close_connection = True
 
-    def _send_file(self, path: Path, content_type: str):
+    def _send_file(self, path: Path, content_type: str, set_cookie: str | None = None):
         try:
             body = path.read_bytes()
         except OSError:
@@ -604,6 +614,14 @@ class Handler(BaseHTTPRequestHandler):
             # browser caching otherwise serves a stale UI after an edit.
             if path.parent == STATIC_DIR:
                 self.send_header("Cache-Control", "no-store")
+            if set_cookie is not None:
+                # Persist the token so the SPA's later /api/* fetches authenticate
+                # without carrying it in every URL. HttpOnly keeps it out of JS
+                # (XSS can't read it); SameSite=Strict blocks cross-site sends.
+                self.send_header(
+                    "Set-Cookie",
+                    f"{AUTH_COOKIE}={set_cookie}; Path=/; HttpOnly; SameSite=Strict",
+                )
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -627,16 +645,61 @@ class Handler(BaseHTTPRequestHandler):
             hostname = host
         return hostname in LOOPBACK_HOSTS
 
-    def do_GET(self):
+    def _query_token(self) -> str | None:
+        values = parse_qs(urlparse(self.path).query).get("token")
+        return values[0] if values else None
+
+    def _presented_token(self) -> str | None:
+        """The auth token from (in order) Bearer header, X-Auth-Token, cookie, query."""
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            return auth[7:].strip()
+        header_token = self.headers.get("X-Auth-Token")
+        if header_token:
+            return header_token.strip()
+        raw_cookie = self.headers.get("Cookie")
+        if raw_cookie:
+            jar = SimpleCookie()
+            try:
+                jar.load(raw_cookie)
+            except CookieError:
+                jar = SimpleCookie()
+            if AUTH_COOKIE in jar:
+                return jar[AUTH_COOKIE].value
+        return self._query_token()
+
+    def _authorized(self) -> bool:
+        if AUTH_TOKEN is None:
+            return True
+        token = self._presented_token()
+        return token is not None and hmac.compare_digest(token, AUTH_TOKEN)
+
+    def _guard(self) -> bool:
+        """Host-header + auth gate shared by every verb; sends the error itself."""
         if HOST_CHECK and not self._host_allowed():
             self.send_error(403, "Host not allowed")
+            return False
+        if not self._authorized():
+            # Plain 401 (no WWW-Authenticate: Basic) so browsers don't pop a
+            # credential dialog — auth is via the tokened link/cookie instead.
+            self.send_error(401, "Authentication required")
+            return False
+        return True
+
+    def do_GET(self):
+        if not self._guard():
             return
 
         parsed = urlparse(self.path)
         route = parsed.path
 
         if route == "/" or route == "/index.html":
-            self._send_file(STATIC_DIR / "index.html", "text/html; charset=utf-8")
+            # A valid token in the URL bootstraps the session cookie so the SPA's
+            # subsequent fetches authenticate without it in every request.
+            cookie = AUTH_TOKEN if (AUTH_TOKEN is not None and self._query_token()) else None
+            self._send_file(
+                STATIC_DIR / "index.html", "text/html; charset=utf-8", set_cookie=cookie
+            )
             return
         if route == "/app.js":
             self._send_file(STATIC_DIR / "app.js", "application/javascript; charset=utf-8")
@@ -729,8 +792,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
-        if HOST_CHECK and not self._host_allowed():
-            self.send_error(403, "Host not allowed")
+        if not self._guard():
             return
 
         route = urlparse(self.path).path
@@ -788,8 +850,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"opened": str(opened)})
 
     def do_PUT(self):
-        if HOST_CHECK and not self._host_allowed():
-            self.send_error(403, "Host not allowed")
+        if not self._guard():
             return
 
         if urlparse(self.path).path != "/api/session-name":
@@ -837,7 +898,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global CUSTOM_NAMES_FILE, HOST_CHECK
+    global CUSTOM_NAMES_FILE, HOST_CHECK, AUTH_TOKEN
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", type=int, default=3132)
     ap.add_argument("--host", default=DEFAULT_HOST)
@@ -874,7 +935,15 @@ def main():
         help="oversee many pods: read per-pod transcript trees under this mirror "
         "dir (populated by collector.py) instead of the local machine's own",
     )
+    ap.add_argument(
+        "--auth-token",
+        default=None,
+        help="require this shared secret on every request (or set CC_VIEWER_TOKEN). "
+        "Needed to safely expose the viewer on a public --host.",
+    )
     args = ap.parse_args()
+
+    AUTH_TOKEN = args.auth_token or os.environ.get("CC_VIEWER_TOKEN") or None
 
     CUSTOM_NAMES_FILE = args.custom_names_file.expanduser()
     claude.configure(args.projects_dir)
@@ -901,7 +970,17 @@ def main():
         print(f"  cursor db:       {cursor.DB_PATH}")
         print(f"  cursor projects: {cursor.PROJECTS_DIR}")
         print(f"  cursor chats:    {cursor.CHATS_DIR}")
+    if AUTH_TOKEN is not None:
+        print("  auth:            token required (?token=… on first visit sets a cookie)")
+    else:
+        print("  auth:            none")
     print(f"  serving at:      {url}")
+    if args.host not in LOOPBACK_HOSTS and AUTH_TOKEN is None:
+        print(
+            "  ⚠  bound to a non-loopback host with NO --auth-token: transcripts are\n"
+            "     exposed unauthenticated. Set --auth-token / CC_VIEWER_TOKEN, and put\n"
+            "     TLS in front (e.g. RunPod's HTTPS proxy) before sharing the link."
+        )
     print("  (Ctrl-C to stop)")
     try:
         server.serve_forever()

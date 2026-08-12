@@ -63,6 +63,12 @@ class MirrorModeTest(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 server.resolve_transcript_file(str(stray))
 
+    def test_staging_dotdir_is_not_a_pod(self):
+        # The collector's .staging scratch area must never be listed as a pod.
+        (self.mirror_dir / ".staging" / "junk").mkdir(parents=True)
+        pods = {s.get("pod") for s in server.list_sessions()}
+        self.assertEqual(pods, {"pod-red", "pod-blue"})
+
     def test_pod_without_metadata_still_lists(self):
         bare = self.mirror_dir / "pod-green"
         (bare / "claude" / "projects").mkdir(parents=True)
