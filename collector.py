@@ -205,6 +205,16 @@ def main() -> None:
     try:
         while True:
             start = time.monotonic()
+            # Re-read the registry each cycle so pods added to pods.json are
+            # picked up live, with no collector restart. Keep the last good list
+            # if the file is mid-edit or malformed.
+            try:
+                new_pods = load_registry(args.config.expanduser())
+                if len(new_pods) != len(pods):
+                    _log(f"registry now has {len(new_pods)} pod(s)")
+                pods = new_pods
+            except (OSError, ValueError) as e:
+                _log(f"registry reload failed, keeping previous ({e})")
             sync_once(pods, args.mirror, args.workers)
             time.sleep(max(0.0, args.interval - (time.monotonic() - start)))
     except KeyboardInterrupt:
