@@ -12,3 +12,6 @@ venv/
 .vscode/
 .cursor/
 .claude/
+# Local pod registry (infra IPs/keys) and the mirror it populates
+pods.json
+mirror/

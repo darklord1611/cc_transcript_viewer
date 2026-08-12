@@ -1,0 +1,14 @@
+{
+  "pods": [
+    {
+      "id": "red-domain-code",
+      "team": "red",
+      "game": "domain code",
+      "label": "red \u00b7 domain code",
+      "host": "POD_PUBLIC_IP",
+      "port": 22222,
+      "user": "root",
+      "key": "~/.ssh/id_ed25519"
+    }
+  ]
+}

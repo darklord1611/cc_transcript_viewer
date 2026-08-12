@@ -103,16 +103,33 @@ Asserted by `test_security.py`; these are load-bearing product claims, not incid
 
 ### Mirror mode (multi-pod oversight)
 
-`python3 server.py --mirror <dir>` switches the viewer from the local machine's
-transcripts to per-pod transcript trees under `<dir>/<pod-id>/{claude,codex}/…`
-(populated out-of-band by a collector that rsyncs each RunPod pod). All of this
-lives in `mirror.py`, which points the existing parsers at each pod's roots in
-turn and tags every session with `pod`/`team`/`game`; local mode is untouched.
-Two invariants it upholds: it never clears the parsers' summary caches (it sets
-the module globals directly, since paths are pod-unique), and it serializes those
-global swaps under a lock because the server is threaded. In mirror mode the
-allowed-root check (`resolve_transcript_file`) confines reads to the mirrored pod
-trees via `mirror.owns()`. `test_mirror.py` covers tagging and confinement.
+Two decoupled processes let one hub oversee many RunPod pods' transcripts:
+
+- **`collector.py`** (the *only* networked component) reads a `pods.json` registry
+  and pulls each pod's transcript dirs over SSH into
+  `<mirror>/<pod-id>/{claude,codex}/…`, then writes `<pod-id>/pod.json` with the
+  team/game labels. Transport is `ssh 'tar -c' | tar -x` into a staging dir (tar
+  needs nothing installed on the pod and preserves mtimes, so the summary cache
+  stays valid) followed by a *local* `rsync -a --delete` into the live mirror (the
+  hub has rsync) for per-file-atomic updates + deletion propagation. Run
+  `--once` or `--interval N`. `pods.json` and `mirror/` are gitignored (infra
+  IPs/keys); `pods.example.json` is the template.
+- **`server.py --mirror <dir>`** serves that tree and never touches the network,
+  so its "no outbound connections" guarantee is intact — all reach-out is in the
+  collector, which `server.py` does not import.
+
+`mirror.py` is the viewer-side glue: it points the existing parsers at each pod's
+roots in turn and tags every session with `pod`/`team`/`game`; local mode is
+untouched. Two invariants it upholds: it never clears the parsers' summary caches
+(it sets the module globals directly, since paths are pod-unique), and it
+serializes those global swaps under a lock because the server is threaded. In
+mirror mode the allowed-root check (`resolve_transcript_file`) confines reads to
+the mirrored pod trees via `mirror.owns()`. `test_mirror.py` covers tagging and
+confinement.
+
+Known Phase-2 gaps: images referenced by absolute pod paths don't resolve on the
+hub (the file lives on the pod), and there's no auth yet — the public-endpoint
+token gate is Phase 3.
 
 ## Fragility to be aware of
 
