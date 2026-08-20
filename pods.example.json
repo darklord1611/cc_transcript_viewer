@@ -28,6 +28,33 @@
       "key": "~/.ssh/id_ed25519"
     },
     {
+      "id": "red4",
+      "team": "red",
+      "label": "red4",
+      "host": "POD_PUBLIC_IP",
+      "port": 22222,
+      "user": "root",
+      "key": "~/.ssh/id_ed25519"
+    },
+    {
+      "id": "red5",
+      "team": "red",
+      "label": "red5",
+      "host": "POD_PUBLIC_IP",
+      "port": 22222,
+      "user": "root",
+      "key": "~/.ssh/id_ed25519"
+    },
+    {
+      "id": "red6",
+      "team": "red",
+      "label": "red6",
+      "host": "POD_PUBLIC_IP",
+      "port": 22222,
+      "user": "root",
+      "key": "~/.ssh/id_ed25519"
+    },
+    {
       "id": "blue1",
       "team": "blue",
       "label": "blue1",
@@ -37,9 +64,45 @@
       "key": "~/.ssh/id_ed25519"
     },
     {
+      "id": "blue2",
+      "team": "blue",
+      "label": "blue2",
+      "host": "POD_PUBLIC_IP",
+      "port": 22222,
+      "user": "root",
+      "key": "~/.ssh/id_ed25519"
+    },
+    {
+      "id": "blue3",
+      "team": "blue",
+      "label": "blue3",
+      "host": "POD_PUBLIC_IP",
+      "port": 22222,
+      "user": "root",
+      "key": "~/.ssh/id_ed25519"
+    },
+    {
+      "id": "blue4",
+      "team": "blue",
+      "label": "blue4",
+      "host": "POD_PUBLIC_IP",
+      "port": 22222,
+      "user": "root",
+      "key": "~/.ssh/id_ed25519"
+    },
+    {
       "id": "green1",
       "team": "green",
       "label": "green1",
+      "host": "POD_PUBLIC_IP",
+      "port": 22222,
+      "user": "root",
+      "key": "~/.ssh/id_ed25519"
+    },
+    {
+      "id": "green2",
+      "team": "green",
+      "label": "green2",
       "host": "POD_PUBLIC_IP",
       "port": 22222,
       "user": "root",
