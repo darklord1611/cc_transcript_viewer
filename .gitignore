@@ -20,3 +20,4 @@ mirror/
 .viewer_token
 *.runlog
 mirror_archive/
+runs_mirror/

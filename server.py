@@ -37,6 +37,7 @@ import claude_parser as claude
 import codex_parser as codex
 import cursor_parser as cursor
 import mirror
+import runs
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_CUSTOM_NAMES_FILE = (
@@ -207,6 +208,15 @@ def list_sessions() -> list[dict]:
     so the list is only the pods being overseen.
     """
     load_summary_caches()
+    if runs.enabled():
+        # Run mode: runs.collect() already emits each run's red parent followed by
+        # its blue/green children, ordered by run number — keep that order (the
+        # sidebar nests by is_subagent/parent_file) instead of the mtime regroup.
+        out = runs.collect()
+        save_summary_caches()
+        for session in out:
+            _apply_custom_name(session)
+        return out
     if mirror.enabled():
         out: list[dict] = mirror.collect()
     else:
@@ -265,6 +275,8 @@ def parse_session(target: Path) -> dict | None:
 
     Returns None if the file is outside every allowed root.
     """
+    if runs.enabled():
+        return runs.parse(target)
     if mirror.enabled():
         return mirror.parse(target)
     if _under(target, claude.PROJECTS_DIR):
@@ -310,7 +322,9 @@ def resolve_transcript_file(file_id: str) -> Path:
     target = Path(file_id).expanduser().resolve()
     if not target.exists():
         raise FileNotFoundError(file_id)
-    if mirror.enabled():
+    if runs.enabled():
+        allowed = runs.owns(target)
+    elif mirror.enabled():
         # Mirror mode confines reads to the mirrored pod trees instead of the
         # hub's own local transcript roots.
         allowed = mirror.owns(target)
@@ -936,6 +950,13 @@ def main():
         "dir (populated by collector.py) instead of the local machine's own",
     )
     ap.add_argument(
+        "--runs",
+        type=Path,
+        default=None,
+        help="run-structured view: read runs_mirror/run<N>/{red,blue,green} "
+        "(staged by collect_runs.py) as one nested tree per run number",
+    )
+    ap.add_argument(
         "--auth-token",
         default=None,
         help="require this shared secret on every request (or set CC_VIEWER_TOKEN). "
@@ -954,6 +975,7 @@ def main():
         chats_dir=args.cursor_chats_dir,
     )
     mirror.configure(args.mirror)
+    runs.configure(args.runs)
     # Enforce the Host allowlist only on the safe loopback default; if the user
     # deliberately binds elsewhere for LAN access, step aside so it still works.
     HOST_CHECK = args.host in LOOPBACK_HOSTS
@@ -961,7 +983,10 @@ def main():
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
     print("Claude Code + Codex + Cursor transcript browser")
-    if mirror.enabled():
+    if runs.enabled():
+        print(f"  run mode:        {runs.RUNS_DIR}")
+        print(f"  runs staged:     {len(runs._run_dirs())}")
+    elif mirror.enabled():
         print(f"  mirror mode:     {mirror.MIRROR_DIR}")
         print(f"  pods overseen:   {len(mirror._pods())}")
     else:
