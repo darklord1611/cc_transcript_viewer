@@ -127,6 +127,30 @@ mirror mode the allowed-root check (`resolve_transcript_file`) confines reads to
 the mirrored pod trees via `mirror.owns()`. `test_mirror.py` covers tagging and
 confinement.
 
+### Run-structured view (auditing game, keyed by run number)
+
+`python3 server.py --runs <dir>` renders one **nested tree per run number** instead
+of a flat/pod list: each run's red organism is the parent row, with its 5 blue
+audits + green eval nested beneath (reusing the existing sub-agent nesting —
+`is_subagent`/`parent_file`). This matches how the three teams' durable transcripts
+are organized on their separate `/workspace` volumes (see
+`AutoSandbag/plans/ARTIFACTS_INDEX.md`): the run number is the unifying key.
+
+- **`collect_runs.py`** stages the transcripts into `runs_mirror/run<N>/{red,blue,green}/`
+  over SSH. Blue is auto-discovered (already numbered by run on the audits volume);
+  red/green are mapped run→slug via `RED_MAP`/`GREEN_MAP` (from `MAPPING.md` /
+  `GREEN_TRANSCRIPTS.md`). A run whose red transcript was never harvested (red3/red5
+  pods shut down first) gets a `_LOST.jsonl` placeholder carrying the substitute note,
+  so the gap shows in place (`red_lost` flag → LOST badge).
+- **`runs.py`** is the viewer glue: enumerate `run<N>/` dirs (plus named controls like
+  `overt`, sorted after the numbered runs), parse each transcript with claude_parser,
+  and tag `run`/`team`/`role`, linking blue/green as children of the red parent.
+  `server.list_sessions` keeps run mode's parent-then-children order (no mtime regroup);
+  reads are confined to `runs_mirror` via `runs.owns()`. Frontend adds a **Run** filter
+  and run/role/LOST badges. `test_runs.py` covers nesting, tagging, order, confinement.
+
+Run mode takes precedence over `--mirror`/local when set. `runs_mirror/` is gitignored.
+
 ### Auth (public-endpoint token gate)
 
 `--auth-token <t>` / `CC_VIEWER_TOKEN` env turns on a shared-secret gate so the

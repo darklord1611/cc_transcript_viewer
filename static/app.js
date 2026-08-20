@@ -302,6 +302,8 @@ const SELECTED_DIRS = new Set();
 // Selected pod/team values (mirror mode only); empty set = all.
 const SELECTED_TEAMS = new Set();
 const SELECTED_PODS = new Set();
+// Selected run numbers (run mode only); empty set = all.
+const SELECTED_RUNS = new Set();
 // Parent session file keys whose linked subagent subtrees are hidden.
 // Kept outside renderSidebar so live polling does not reopen collapsed groups.
 const COLLAPSED_SUBAGENT_PARENTS = new Set();
@@ -432,6 +434,16 @@ function buildFilters() {
     host.append(makeDropdown("Model", modelGroups, SELECTED_MODELS, () => renderSidebar($("#search").value)));
   }
 
+  // ----- runs (run mode: run1..run10, numeric order) -----
+  const runsList = [...new Set(SESSIONS.map((s) => s.run).filter(Boolean))].sort(
+    (a, b) => (parseInt(String(a).replace(/\D/g, ""), 10) || 0) - (parseInt(String(b).replace(/\D/g, ""), 10) || 0)
+  );
+  for (const v of [...SELECTED_RUNS]) if (!runsList.includes(v)) SELECTED_RUNS.delete(v);
+  if (runsList.length) {
+    const items = runsList.map((r) => ({ value: r, label: r }));
+    host.append(makeDropdown("Run", [{ label: "", items }], SELECTED_RUNS, () => renderSidebar($("#search").value)));
+  }
+
   // ----- teams (mirror mode: red/blue/green auditing roles) -----
   const teams = [...new Set(SESSIONS.map((s) => s.team).filter(Boolean))].sort();
   for (const v of [...SELECTED_TEAMS]) if (!teams.includes(v)) SELECTED_TEAMS.delete(v);
@@ -468,6 +480,7 @@ function renderSidebar(query) {
     if (SELECTED_DIRS.size && !SELECTED_DIRS.has(s.cwd || "")) return false;
     if (SELECTED_TEAMS.size && !SELECTED_TEAMS.has(s.team || "")) return false;
     if (SELECTED_PODS.size && !SELECTED_PODS.has(s.pod || "")) return false;
+    if (SELECTED_RUNS.size && !SELECTED_RUNS.has(s.run || "")) return false;
     if (!q) return true;
     const metaHit = (
       s.title + " " + (s.original_title || "") + " " + (s.ai_title || "") + " " +
@@ -549,12 +562,20 @@ function renderSidebar(query) {
       el(
         "div",
         { class: "session-toprow" },
-        el("span", { class: "agent-tag agent-" + s.agent }, agentLabel(s.agent)),
+        // Run mode leads with the run number and drops the (uniform) agent tag.
+        s.run
+          ? el("span", { class: "run-tag", title: "Run " + s.run }, s.run)
+          : el("span", { class: "agent-tag agent-" + s.agent }, agentLabel(s.agent)),
         s.team
           ? el("span", { class: "team-tag team-" + s.team, title: "Team " + s.team + (s.pod ? " · pod " + s.pod : "") }, s.team)
           : (s.pod ? el("span", { class: "team-tag team-unknown", title: "Pod " + s.pod }, s.pod) : null),
-        s.is_subagent
-          ? el("span", { class: "sidechain-tag" }, s.subagent_type === "guardian" ? "guardian" : "sub-agent")
+        s.role
+          ? el("span", { class: "role-tag" }, s.role)
+          : (s.is_subagent
+              ? el("span", { class: "sidechain-tag" }, s.subagent_type === "guardian" ? "guardian" : "sub-agent")
+              : null),
+        s.red_lost
+          ? el("span", { class: "lost-tag", title: "Red agent transcript was not harvested before the pod was shut down" }, "LOST")
           : null,
         s.cursor_source && String(s.cursor_source).startsWith("cli") && !s.is_subagent
           ? el("span", { class: "sidechain-tag", title: "Cursor CLI agent transcript" }, "CLI")

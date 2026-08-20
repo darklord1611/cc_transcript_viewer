@@ -522,6 +522,26 @@ body.outline-collapsed #nav-buttons { right: 24px; }
 .team-blue { background: #2563a8; color: #fff; border-color: transparent; }
 .team-green { background: #2e7d4f; color: #fff; border-color: transparent; }
 .t-title .team-tag { vertical-align: middle; margin-right: 8px; font-size: 11px; }
+/* Run-structured view: run number, role, and lost-transcript badges. */
+.run-tag {
+  flex: none;
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  padding: 2px 6px; border-radius: 5px; line-height: 1.4;
+  background: var(--fg); color: var(--bg);
+}
+.role-tag {
+  flex: none;
+  font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em;
+  padding: 2px 6px; border-radius: 5px; line-height: 1.4;
+  background: var(--bg); border: 1px solid var(--border); color: var(--muted);
+}
+.lost-tag {
+  flex: none;
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  padding: 2px 6px; border-radius: 5px; line-height: 1.4;
+  background: repeating-linear-gradient(45deg, #8a6d00, #8a6d00 4px, #6f5700 4px, #6f5700 8px);
+  color: #fff;
+}
 .session-meta {
   margin-top: 4px; font-size: 11px; color: var(--muted);
   display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
