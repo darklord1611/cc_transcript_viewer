@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """Run-structured view of the auditing game: one nested tree per run number.
 
-Where mirror.py groups transcripts by *pod*, this groups them by **run number**
-(run1..run10) — the unifying key defined by red's MAPPING.md and reused by blue
-and green (see AutoSandbag/plans/ARTIFACTS_INDEX.md). The durable transcripts
-live on each team's /workspace store and are staged (by collect_runs.py) into:
+Where mirror.py groups transcripts by *pod*, this groups them by **round** then
+**run number** — the unifying key defined by red's ledger and reused by blue and
+green (see AutoSandbag/plans/ARTIFACTS_INDEX.md). Each target model is a round
+(opus48, sonnet5, …); run numbers repeat across rounds, so the round namespaces
+them. The durable transcripts live on each team's /workspace store and are staged
+(by collect_runs.py) into:
 
     runs_mirror/
-        run<N>/
-            red/    <organism>.jsonl        (or _LOST.jsonl placeholder)
-            blue/   audit_runs_<K>/agent_transcript/<uuid>.jsonl   (the 5 audits)
-            green/  <slug>/<uuid>.jsonl      (the eval, sometimes >1)
+        <round>/                           (opus48, sonnet5, …)
+            run<N>/
+                red/    <organism>.jsonl    (or _LOST.jsonl placeholder)
+                blue/   audit_runs_<K>/agent_transcript/<uuid>.jsonl
+                green/  <slug>/<uuid>.jsonl
+                status.txt                 (optional: run outcome, e.g. REFUSED_AUP)
 
 Each run renders as a nested tree: the **red organism** is the parent row, and
 its **5 blue audits + green eval** hang beneath it as children — reusing the
@@ -34,6 +38,10 @@ _LOCK = threading.RLock()
 
 # Role → the badge/label shown in the sidebar; also the child ordering.
 _TEAM_BY_ROLE = {"organism": "red", "audit": "blue", "eval": "green"}
+
+# Round dir name → (display label, sort order). Newer rounds sort first. Unknown
+# rounds fall back to their dir name and sort last.
+_ROUND_META = {"sonnet5": ("sonnet-5", 0), "opus48": ("opus-4.8", 1)}
 
 
 def configure(runs_dir) -> None:
@@ -62,11 +70,20 @@ def _sort_key(name: str) -> tuple[int, int, str]:
     return (1, _CONTROL_ORDER.get(name, 99), name)
 
 
-def _run_dirs() -> list[Path]:
+def _round_dirs() -> list[Path]:
+    """Immediate subdirs of the runs dir that hold run<N>/ dirs, newest round first."""
     if RUNS_DIR is None or not RUNS_DIR.exists():
         return []
-    dirs = [
+    rounds = [
         d for d in RUNS_DIR.iterdir()
+        if d.is_dir() and not d.name.startswith(".") and _run_dirs(d)
+    ]
+    return sorted(rounds, key=lambda d: (_ROUND_META.get(d.name, (d.name, 99))[1], d.name))
+
+
+def _run_dirs(round_dir: Path) -> list[Path]:
+    dirs = [
+        d for d in round_dir.iterdir()
         if d.is_dir() and (_run_num(d.name) is not None or d.name in _CONTROL_ORDER)
     ]
     return sorted(dirs, key=lambda d: _sort_key(d.name))
@@ -118,9 +135,10 @@ def _summary(path: Path) -> dict:
     return dict(claude.session_summary(path))
 
 
-def _tag(s: dict, *, run: str, role: str, parent_file: str | None,
+def _tag(s: dict, *, run: str, round_label: str, role: str, parent_file: str | None,
          parent_id: str | None, label: str | None = None) -> dict:
     s["run"] = run
+    s["round"] = round_label
     s["team"] = _TEAM_BY_ROLE[role]
     s["role"] = label or role
     if parent_file is not None:  # a child (blue/green) nested under the red parent
@@ -139,23 +157,28 @@ def collect() -> list[dict]:
     them directly (server.list_sessions keeps this order in run mode)."""
     out: list[dict] = []
     with _LOCK:
-        for run_dir in _run_dirs():
-            run = run_dir.name
-            red = _red_path(run_dir)
-            if red is None:
-                continue  # a run with no red slot at all — skip until staged
-            parent = _tag(_summary(red), run=run, role="organism",
-                          parent_file=None, parent_id=None)
-            if red.name == "_LOST.jsonl":
-                parent["red_lost"] = True
-            pf, pid = parent["file"], parent["id"]
-            out.append(parent)
-            for label, bp in _blue_audits(run_dir):
-                out.append(_tag(_summary(bp), run=run, role="audit",
-                                parent_file=pf, parent_id=pid, label=label))
-            for gp in _green_evals(run_dir):
-                out.append(_tag(_summary(gp), run=run, role="eval",
-                                parent_file=pf, parent_id=pid))
+        for round_dir in _round_dirs():
+            rlabel = _ROUND_META.get(round_dir.name, (round_dir.name, 99))[0]
+            for run_dir in _run_dirs(round_dir):
+                run = run_dir.name
+                red = _red_path(run_dir)
+                if red is None:
+                    continue  # a run with no red slot at all — skip until staged
+                parent = _tag(_summary(red), run=run, round_label=rlabel,
+                              role="organism", parent_file=None, parent_id=None)
+                if red.name == "_LOST.jsonl":
+                    parent["red_lost"] = True
+                status = run_dir / "status.txt"
+                if status.exists():
+                    parent["status"] = status.read_text().strip()[:40]
+                pf, pid = parent["file"], parent["id"]
+                out.append(parent)
+                for label, bp in _blue_audits(run_dir):
+                    out.append(_tag(_summary(bp), run=run, round_label=rlabel,
+                                    role="audit", parent_file=pf, parent_id=pid, label=label))
+                for gp in _green_evals(run_dir):
+                    out.append(_tag(_summary(gp), run=run, round_label=rlabel,
+                                    role="eval", parent_file=pf, parent_id=pid))
     return out
 
 

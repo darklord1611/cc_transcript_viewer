@@ -302,8 +302,9 @@ const SELECTED_DIRS = new Set();
 // Selected pod/team values (mirror mode only); empty set = all.
 const SELECTED_TEAMS = new Set();
 const SELECTED_PODS = new Set();
-// Selected run numbers (run mode only); empty set = all.
+// Selected run numbers / rounds (run mode only); empty set = all.
 const SELECTED_RUNS = new Set();
+const SELECTED_ROUNDS = new Set();
 // Parent session file keys whose linked subagent subtrees are hidden.
 // Kept outside renderSidebar so live polling does not reopen collapsed groups.
 const COLLAPSED_SUBAGENT_PARENTS = new Set();
@@ -330,6 +331,14 @@ function sessionsSignature(list) {
 function sessionMtime(file) {
   const s = SESSIONS.find((x) => x.file === file);
   return s ? (s.mtime || 0) : 0;
+}
+
+// Run-outcome badge colour bucket (sonnet-5 statuses like REFUSED_AUP, ORGANISM).
+function statusClass(s) {
+  const t = String(s || "").toUpperCase();
+  if (t.includes("ORGANISM")) return "organism";
+  if (t.includes("REFUSED") || t.includes("STALLED")) return "refused";
+  return "warn";
 }
 
 // ---------- dropdown filters (model / directory) ----------
@@ -434,6 +443,14 @@ function buildFilters() {
     host.append(makeDropdown("Model", modelGroups, SELECTED_MODELS, () => renderSidebar($("#search").value)));
   }
 
+  // ----- rounds (run mode: target-model round, e.g. sonnet-5 / opus-4.8) -----
+  const roundsList = [...new Set(SESSIONS.map((s) => s.round).filter(Boolean))];
+  for (const v of [...SELECTED_ROUNDS]) if (!roundsList.includes(v)) SELECTED_ROUNDS.delete(v);
+  if (roundsList.length > 1) {
+    const items = roundsList.map((r) => ({ value: r, label: r }));
+    host.append(makeDropdown("Round", [{ label: "", items }], SELECTED_ROUNDS, () => renderSidebar($("#search").value)));
+  }
+
   // ----- runs (run mode: run1..run10, numeric order) -----
   const runsList = [...new Set(SESSIONS.map((s) => s.run).filter(Boolean))].sort(
     (a, b) => (parseInt(String(a).replace(/\D/g, ""), 10) || 0) - (parseInt(String(b).replace(/\D/g, ""), 10) || 0)
@@ -481,6 +498,7 @@ function renderSidebar(query) {
     if (SELECTED_TEAMS.size && !SELECTED_TEAMS.has(s.team || "")) return false;
     if (SELECTED_PODS.size && !SELECTED_PODS.has(s.pod || "")) return false;
     if (SELECTED_RUNS.size && !SELECTED_RUNS.has(s.run || "")) return false;
+    if (SELECTED_ROUNDS.size && !SELECTED_ROUNDS.has(s.round || "")) return false;
     if (!q) return true;
     const metaHit = (
       s.title + " " + (s.original_title || "") + " " + (s.ai_title || "") + " " +
@@ -562,10 +580,14 @@ function renderSidebar(query) {
       el(
         "div",
         { class: "session-toprow" },
-        // Run mode leads with the run number and drops the (uniform) agent tag.
+        // Run mode leads with the round + run number and drops the (uniform) agent tag.
+        !s.run ? el("span", { class: "agent-tag agent-" + s.agent }, agentLabel(s.agent)) : null,
+        s.round && !s.is_subagent
+          ? el("span", { class: "round-tag", title: "Round " + s.round }, s.round)
+          : null,
         s.run
           ? el("span", { class: "run-tag", title: "Run " + s.run }, s.run)
-          : el("span", { class: "agent-tag agent-" + s.agent }, agentLabel(s.agent)),
+          : null,
         s.team
           ? el("span", { class: "team-tag team-" + s.team, title: "Team " + s.team + (s.pod ? " · pod " + s.pod : "") }, s.team)
           : (s.pod ? el("span", { class: "team-tag team-unknown", title: "Pod " + s.pod }, s.pod) : null),
@@ -576,6 +598,9 @@ function renderSidebar(query) {
               : null),
         s.red_lost
           ? el("span", { class: "lost-tag", title: "Red agent transcript was not harvested before the pod was shut down" }, "LOST")
+          : null,
+        s.status
+          ? el("span", { class: "status-tag status-" + statusClass(s.status), title: "Run outcome: " + s.status }, s.status)
           : null,
         s.cursor_source && String(s.cursor_source).startsWith("cli") && !s.is_subagent
           ? el("span", { class: "sidechain-tag", title: "Cursor CLI agent transcript" }, "CLI")
