@@ -27,16 +27,21 @@ class RunsModeTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self._tmp.name) / "runs_mirror"
+        op = self.dir / "opus48"
         # run1: red LOST + 2 blue audits (one a _RESUME variant) + 1 green
-        _mk(self.dir / "run1" / "red" / "_LOST.jsonl", "lost note")
-        _mk(self.dir / "run1" / "blue" / "audit_runs_1" / "agent_transcript" / "a.jsonl", "blue a")
-        _mk(self.dir / "run1" / "blue" / "audit_runs_1_RESUME" / "agent_transcript" / "b.jsonl", "resume")
-        _mk(self.dir / "run1" / "green" / "slug" / "g.jsonl", "green eval")
+        _mk(op / "run1" / "red" / "_LOST.jsonl", "lost note")
+        _mk(op / "run1" / "blue" / "audit_runs_1" / "agent_transcript" / "a.jsonl", "blue a")
+        _mk(op / "run1" / "blue" / "audit_runs_1_RESUME" / "agent_transcript" / "b.jsonl", "resume")
+        _mk(op / "run1" / "green" / "slug" / "g.jsonl", "green eval")
         # run2: real red organism + 1 blue
-        _mk(self.dir / "run2" / "red" / "org-slug" / "r.jsonl", "red organism")
-        _mk(self.dir / "run2" / "blue" / "audit_runs_1" / "agent_transcript" / "c.jsonl", "blue c")
-        # overt control (must sort last)
-        _mk(self.dir / "overt" / "red" / "_LOST.jsonl", "overt lost")
+        _mk(op / "run2" / "red" / "org-slug" / "r.jsonl", "red organism")
+        _mk(op / "run2" / "blue" / "audit_runs_1" / "agent_transcript" / "c.jsonl", "blue c")
+        # overt control (must sort last within the round)
+        _mk(op / "overt" / "red" / "_LOST.jsonl", "overt lost")
+        # A newer round (sonnet5): red-only, status-badged; must sort BEFORE opus48.
+        s5 = self.dir / "sonnet5"
+        _mk(s5 / "run7" / "red" / "slug" / "s.jsonl", "sonnet red")
+        (s5 / "run7" / "status.txt").write_text("REFUSED_AUP")
         runs.configure(self.dir)
 
     def tearDown(self):
@@ -68,9 +73,21 @@ class RunsModeTest(unittest.TestCase):
         run2_parent = next(s for s in out if s["run"] == "run2" and not s["is_subagent"])
         self.assertNotIn("red_lost", run2_parent)
 
+    def test_round_tag_and_order(self):
+        out = server.list_sessions()
+        # sonnet-5 (newer) round parents come before opus-4.8's.
+        parents = [s for s in out if not s["is_subagent"]]
+        self.assertEqual(parents[0]["round"], "sonnet-5")
+        self.assertEqual([s["round"] for s in parents if s["run"] == "run1"], ["opus-4.8"])
+
+    def test_sonnet_status_badge(self):
+        s5 = next(s for s in server.list_sessions() if s["round"] == "sonnet-5")
+        self.assertEqual(s5["status"], "REFUSED_AUP")
+
     def test_run_order_controls_last(self):
-        order = [s["run"] for s in server.list_sessions() if not s["is_subagent"]]
-        self.assertEqual(order, ["run1", "run2", "overt"])
+        opus = [s["run"] for s in server.list_sessions()
+                if not s["is_subagent"] and s["round"] == "opus-4.8"]
+        self.assertEqual(opus, ["run1", "run2", "overt"])
 
     def test_reads_confined_to_runs_dir(self):
         with tempfile.TemporaryDirectory() as outside:

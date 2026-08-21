@@ -984,8 +984,10 @@ def main():
     url = f"http://{args.host}:{args.port}/"
     print("Claude Code + Codex + Cursor transcript browser")
     if runs.enabled():
+        _round_dirs = runs._round_dirs()
         print(f"  run mode:        {runs.RUNS_DIR}")
-        print(f"  runs staged:     {len(runs._run_dirs())}")
+        print(f"  rounds staged:   {len(_round_dirs)} "
+              f"({sum(len(runs._run_dirs(r)) for r in _round_dirs)} runs)")
     elif mirror.enabled():
         print(f"  mirror mode:     {mirror.MIRROR_DIR}")
         print(f"  pods overseen:   {len(mirror._pods())}")

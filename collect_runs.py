@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -128,17 +129,57 @@ def _write_lost(run: str, red_dir: Path, note: str) -> None:
     (red_dir / "_LOST.jsonl").write_text(json.dumps(rec) + "\n")
 
 
+def collect_sonnet5(red: dict, out: Path) -> None:
+    """Stage the sonnet-5 round: red-only, auto-discovered, each run status-badged.
+
+    Sonnet 5 mostly refused the task, so there are few blue/green artifacts — this
+    globs every /workspace/agent_transcripts/*/-root-sonnet-5-run<N>/ transcript and
+    reads each run's outcome from its /workspace/sonnet_5_run<N>_<STATUS> folder."""
+    if red is None:
+        _log("sonnet5: no red pod")
+        return
+    slugs = _remote_lines(
+        red, 'find /workspace/agent_transcripts -maxdepth 2 -type d '
+             '-name "-root-sonnet-5-run*" 2>/dev/null')
+    # run# -> outcome, parsed from the wrapped-run folder names.
+    status: dict[str, str] = {}
+    for folder in _remote_lines(red, 'ls -1 /workspace | grep -E "^sonnet_5_run[0-9]+"'):
+        m = re.match(r"sonnet_5_run(\d+)_?(.*)$", folder)
+        if m and m.group(2):
+            status.setdefault(f"run{m.group(1)}", m.group(2))
+    for slug_path in slugs:
+        m = re.search(r"-root-sonnet-5-run(\d+)", slug_path)
+        if not m:
+            continue
+        run = f"run{m.group(1)}"
+        parent, slug = slug_path.rsplit("/", 1)
+        if _pull(red, parent, [slug], out / run / "red"):
+            if run in status:
+                (out / run).mkdir(parents=True, exist_ok=True)
+                (out / run / "status.txt").write_text(status[run])
+            _log(f"sonnet5 {run}: red ({status.get(run,'?')})")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", type=Path, default=Path("pods.json"))
     ap.add_argument("--out", type=Path, default=Path("runs_mirror"))
+    ap.add_argument("--round", default="opus48", choices=["opus48", "sonnet5"],
+                    help="which round to stage (default opus48)")
     ap.add_argument("--runs", default="", help="comma list to limit (default: all)")
     args = ap.parse_args()
 
     pods = json.loads(args.config.expanduser().read_text()).get("pods", [])
-    red, blue, green = _pick(pods, "red"), _pick(pods, "blue"), _pick(pods, "green")
-    out = args.out
+    red = _pick(pods, "red")
+    out = args.out / args.round
     out.mkdir(parents=True, exist_ok=True)
+
+    if args.round == "sonnet5":
+        collect_sonnet5(red, out)
+        _log("done")
+        return
+
+    blue, green = _pick(pods, "blue"), _pick(pods, "green")
     wanted = set(args.runs.split(",")) if args.runs else set(ALL_RUNS)
 
     # Reference docs + the two substitute notes (for LOST placeholders).

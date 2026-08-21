@@ -129,19 +129,28 @@ confinement.
 
 ### Run-structured view (auditing game, keyed by run number)
 
-`python3 server.py --runs <dir>` renders one **nested tree per run number** instead
-of a flat/pod list: each run's red organism is the parent row, with its 5 blue
-audits + green eval nested beneath (reusing the existing sub-agent nesting —
+`python3 server.py --runs <dir>` renders one **nested tree per run number**, grouped
+by **round** (target model): each run's red organism is the parent row, with its 5
+blue audits + green eval nested beneath (reusing the existing sub-agent nesting —
 `is_subagent`/`parent_file`). This matches how the three teams' durable transcripts
 are organized on their separate `/workspace` volumes (see
 `AutoSandbag/plans/ARTIFACTS_INDEX.md`): the run number is the unifying key.
 
-- **`collect_runs.py`** stages the transcripts into `runs_mirror/run<N>/{red,blue,green}/`
-  over SSH. Blue is auto-discovered (already numbered by run on the audits volume);
-  red/green are mapped run→slug via `RED_MAP`/`GREEN_MAP` (from `MAPPING.md` /
-  `GREEN_TRANSCRIPTS.md`). A run whose red transcript was never harvested (red3/red5
-  pods shut down first) gets a `_LOST.jsonl` placeholder carrying the substitute note,
-  so the gap shows in place (`red_lost` flag → LOST badge).
+Layout is `runs_mirror/<round>/run<N>/{red,blue,green}/` — one round dir per target
+model (`opus48`, `sonnet5`, …; run numbers repeat across rounds so the round
+namespaces them). `runs.py` `_ROUND_META` sets each round's label + sort order
+(newer first). A round may be red-only (sonnet-5 largely refused the task): each run
+carries an optional `status.txt` (e.g. `REFUSED_AUP`, `ORGANISM`) shown as a badge.
+Frontend adds **Round** + **Run** filters and round/role/status/LOST badges.
+
+- **`collect_runs.py --round <name>`** stages a round into
+  `runs_mirror/<round>/run<N>/{red,blue,green}/` over SSH. `--round opus48` (default):
+  blue auto-discovered (already numbered on the audits volume); red/green mapped
+  run→slug via `RED_MAP`/`GREEN_MAP` (from `MAPPING.md` / `GREEN_TRANSCRIPTS.md`); a
+  lost red transcript (red3/red5 shut down first) gets a `_LOST.jsonl` placeholder
+  (→ LOST badge). `--round sonnet5`: red-only, auto-globs
+  `/workspace/agent_transcripts/*/-root-sonnet-5-run<N>/` and writes each run's outcome
+  (from its `sonnet_5_run<N>_<STATUS>` folder) to `status.txt`.
 - **`runs.py`** is the viewer glue: enumerate `run<N>/` dirs (plus named controls like
   `overt`, sorted after the numbered runs), parse each transcript with claude_parser,
   and tag `run`/`team`/`role`, linking blue/green as children of the red parent.
