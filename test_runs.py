@@ -27,7 +27,7 @@ class RunsModeTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self._tmp.name) / "runs_mirror"
-        op = self.dir / "opus48"
+        op = self.dir / "opus48-math"
         # run1: red LOST + 2 blue audits (one a _RESUME variant) + 1 green
         _mk(op / "run1" / "red" / "_LOST.jsonl", "lost note")
         _mk(op / "run1" / "blue" / "audit_runs_1" / "agent_transcript" / "a.jsonl", "blue a")
@@ -38,8 +38,8 @@ class RunsModeTest(unittest.TestCase):
         _mk(op / "run2" / "blue" / "audit_runs_1" / "agent_transcript" / "c.jsonl", "blue c")
         # overt control (must sort last within the round)
         _mk(op / "overt" / "red" / "_LOST.jsonl", "overt lost")
-        # A newer round (sonnet5): red-only, status-badged; must sort BEFORE opus48.
-        s5 = self.dir / "sonnet5"
+        # A newer combo (sonnet5-code): red-only, status-badged; sorts BEFORE opus.
+        s5 = self.dir / "sonnet5-code"
         _mk(s5 / "run7" / "red" / "slug" / "s.jsonl", "sonnet red")
         (s5 / "run7" / "status.txt").write_text("REFUSED_AUP")
         runs.configure(self.dir)
@@ -73,20 +73,22 @@ class RunsModeTest(unittest.TestCase):
         run2_parent = next(s for s in out if s["run"] == "run2" and not s["is_subagent"])
         self.assertNotIn("red_lost", run2_parent)
 
-    def test_round_tag_and_order(self):
+    def test_round_model_domain_and_order(self):
         out = server.list_sessions()
-        # sonnet-5 (newer) round parents come before opus-4.8's.
+        # sonnet-5 combos (newer) sort before opus-4.8's.
         parents = [s for s in out if not s["is_subagent"]]
-        self.assertEqual(parents[0]["round"], "sonnet-5")
-        self.assertEqual([s["round"] for s in parents if s["run"] == "run1"], ["opus-4.8"])
+        self.assertEqual(parents[0]["round"], "sonnet-5 · code")
+        self.assertEqual((parents[0]["round_model"], parents[0]["domain"]), ("sonnet-5", "code"))
+        run1 = next(s for s in parents if s["run"] == "run1")
+        self.assertEqual((run1["round_model"], run1["domain"]), ("opus-4.8", "math"))
 
     def test_sonnet_status_badge(self):
-        s5 = next(s for s in server.list_sessions() if s["round"] == "sonnet-5")
+        s5 = next(s for s in server.list_sessions() if s["round_model"] == "sonnet-5")
         self.assertEqual(s5["status"], "REFUSED_AUP")
 
     def test_run_order_controls_last(self):
         opus = [s["run"] for s in server.list_sessions()
-                if not s["is_subagent"] and s["round"] == "opus-4.8"]
+                if not s["is_subagent"] and s["round"] == "opus-4.8 · math"]
         self.assertEqual(opus, ["run1", "run2", "overt"])
 
     def test_reads_confined_to_runs_dir(self):

@@ -141,7 +141,10 @@ Layout is `runs_mirror/<round>/run<N>/{red,blue,green}/` — one round dir per
 run numbers repeat across rounds so the round namespaces them). `runs.py`
 `_ROUND_META` sets each round's label + sort order (sonnet first). Most combos are
 red-only (from the `.mo_archive` consolidation); `opus48-math` is the one with full
-red→blue×5→green nesting. A round may be red-only (sonnet-5 largely refused the task): each run
+red→blue×5→green nesting. Each session is also tagged `round_model` + `domain`
+(parsed from the round dir), which drive separate **Model** and **Domain** sidebar
+filters — the run list stays hidden behind a prompt until a Model is picked, so the
+118-row set isn't dumped at once (`renderSidebar` run-mode gate). A round may be red-only (sonnet-5 largely refused the task): each run
 carries an optional `status.txt` (e.g. `REFUSED_AUP`, `ORGANISM`) shown as a badge.
 Frontend adds **Round** + **Run** filters and round/role/status/LOST badges.
 
