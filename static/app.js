@@ -424,24 +424,29 @@ function makeDropdown(title, groups, selected, onChange) {
 function buildFilters() {
   const host = $("#filter-dropdowns");
   host.innerHTML = "";
+  // In run mode the round Model/Domain filters (below) are the meaningful ones;
+  // the raw model-id and directory dropdowns are redundant/noisy, so skip them.
+  const runMode = SESSIONS.some((s) => s.round_model);
 
-  // ----- models, grouped by family -----
-  const families = { Claude: new Map(), GPT: new Map(), Other: new Map() };
-  for (const s of SESSIONS) {
-    if (!s.model) continue;
-    families[modelFamily(s.model)].set(s.model, shortModel(s.model));
-  }
-  const modelGroups = [];
-  for (const fam of ["Claude", "GPT", "Other"]) {
-    const m = families[fam];
-    if (!m.size) continue;
-    const items = [...m.entries()].sort((a, b) => a[1].localeCompare(b[1])).map(([value, label]) => ({ value, label }));
-    modelGroups.push({ label: fam, items });
-  }
-  // prune selections that no longer exist
-  for (const v of [...SELECTED_MODELS]) if (!SESSIONS.some((s) => s.model === v)) SELECTED_MODELS.delete(v);
-  if (modelGroups.length) {
-    host.append(makeDropdown("Model", modelGroups, SELECTED_MODELS, () => renderSidebar($("#search").value)));
+  // ----- models, grouped by family (local/mirror mode only) -----
+  if (!runMode) {
+    const families = { Claude: new Map(), GPT: new Map(), Other: new Map() };
+    for (const s of SESSIONS) {
+      if (!s.model) continue;
+      families[modelFamily(s.model)].set(s.model, shortModel(s.model));
+    }
+    const modelGroups = [];
+    for (const fam of ["Claude", "GPT", "Other"]) {
+      const m = families[fam];
+      if (!m.size) continue;
+      const items = [...m.entries()].sort((a, b) => a[1].localeCompare(b[1])).map(([value, label]) => ({ value, label }));
+      modelGroups.push({ label: fam, items });
+    }
+    // prune selections that no longer exist
+    for (const v of [...SELECTED_MODELS]) if (!SESSIONS.some((s) => s.model === v)) SELECTED_MODELS.delete(v);
+    if (modelGroups.length) {
+      host.append(makeDropdown("Model", modelGroups, SELECTED_MODELS, () => renderSidebar($("#search").value)));
+    }
   }
 
   // ----- model then domain (run mode: the {model}×{domain} combos) -----
@@ -484,8 +489,8 @@ function buildFilters() {
     host.append(makeDropdown("Pod", [{ label: "", items }], SELECTED_PODS, () => renderSidebar($("#search").value)));
   }
 
-  // ----- directories (flat) -----
-  const dirs = [...new Set(SESSIONS.map((s) => s.cwd).filter(Boolean))].sort();
+  // ----- directories (flat; skipped in run mode where cwd is noise) -----
+  const dirs = runMode ? [] : [...new Set(SESSIONS.map((s) => s.cwd).filter(Boolean))].sort();
   for (const v of [...SELECTED_DIRS]) if (!dirs.includes(v)) SELECTED_DIRS.delete(v);
   if (dirs.length) {
     const items = dirs.map((d) => ({ value: d, label: shortPath(d) }));

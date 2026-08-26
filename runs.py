@@ -200,12 +200,14 @@ def collect() -> list[dict]:
                     parent["status"] = status.read_text().strip()[:40]
                 _emit(parent)
                 pf, pid = parent["file"], parent["id"]
-                for label, bp in _blue_audits(run_dir):
-                    _emit(_tag(_summary(bp), run=run, round_label=rlabel,
-                               role="audit", parent_file=pf, parent_id=pid, label=label))
+                # Children nest under the red organism as: green eval, then the
+                # blue audits (red → green → 5 blue).
                 for gp in _green_evals(run_dir):
                     _emit(_tag(_summary(gp), run=run, round_label=rlabel,
                                role="eval", parent_file=pf, parent_id=pid))
+                for label, bp in _blue_audits(run_dir):
+                    _emit(_tag(_summary(bp), run=run, round_label=rlabel,
+                               role="audit", parent_file=pf, parent_id=pid, label=label))
     return out
 
 

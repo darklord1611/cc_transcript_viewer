@@ -65,8 +65,8 @@ class RunsModeTest(unittest.TestCase):
         children = run1[1:]
         self.assertTrue(all(c["is_subagent"] and c["parent_file"] == parent["file"] for c in children))
         roles = [c["role"] for c in children]
-        self.assertEqual(roles, ["audit 1", "audit 1 · resume", "eval"])
-        self.assertEqual([c["team"] for c in children], ["blue", "blue", "green"])
+        self.assertEqual(roles, ["eval", "audit 1", "audit 1 · resume"])
+        self.assertEqual([c["team"] for c in children], ["green", "blue", "blue"])
 
     def test_real_red_is_not_lost(self):
         out = server.list_sessions()
