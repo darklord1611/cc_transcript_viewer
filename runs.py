@@ -66,6 +66,16 @@ def enabled() -> bool:
 _CONTROL_ORDER = {"overt": 1, "clean": 2}
 
 
+# round dir prefix -> model display label (domain is the suffix after the '-').
+_MODEL_LABEL = {"sonnet5": "sonnet-5", "opus48": "opus-4.8"}
+
+
+def _model_domain(round_dirname: str) -> tuple[str, str]:
+    """('sonnet-5', 'code') from a round dir like 'sonnet5-code'; domain '' if none."""
+    model_key, _, domain = round_dirname.partition("-")
+    return _MODEL_LABEL.get(model_key, model_key), domain
+
+
 def _run_num(name: str) -> int | None:
     m = re.fullmatch(r"run(\d+)", name)
     return int(m.group(1)) if m else None
@@ -168,6 +178,14 @@ def collect() -> list[dict]:
     with _LOCK:
         for round_dir in _round_dirs():
             rlabel = _ROUND_META.get(round_dir.name, (round_dir.name, 99))[0]
+            rmodel, domain = _model_domain(round_dir.name)
+
+            def _emit(session: dict) -> dict:
+                session["round_model"] = rmodel
+                session["domain"] = domain
+                out.append(session)
+                return session
+
             for run_dir in _run_dirs(round_dir):
                 run = run_dir.name
                 red = _red_path(run_dir)
@@ -180,14 +198,14 @@ def collect() -> list[dict]:
                 status = run_dir / "status.txt"
                 if status.exists():
                     parent["status"] = status.read_text().strip()[:40]
+                _emit(parent)
                 pf, pid = parent["file"], parent["id"]
-                out.append(parent)
                 for label, bp in _blue_audits(run_dir):
-                    out.append(_tag(_summary(bp), run=run, round_label=rlabel,
-                                    role="audit", parent_file=pf, parent_id=pid, label=label))
+                    _emit(_tag(_summary(bp), run=run, round_label=rlabel,
+                               role="audit", parent_file=pf, parent_id=pid, label=label))
                 for gp in _green_evals(run_dir):
-                    out.append(_tag(_summary(gp), run=run, round_label=rlabel,
-                                    role="eval", parent_file=pf, parent_id=pid))
+                    _emit(_tag(_summary(gp), run=run, round_label=rlabel,
+                               role="eval", parent_file=pf, parent_id=pid))
     return out
 
 

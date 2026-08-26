@@ -556,6 +556,10 @@ body.outline-collapsed #nav-buttons { right: 24px; }
 .status-organism { background: #2e7d4f; }
 .status-refused { background: #b5651d; }
 .status-warn { background: #7a7a1f; }
+.sidebar-hint {
+  padding: 18px 14px; color: var(--muted); font-size: 13px; line-height: 1.5;
+  text-align: center;
+}
 .session-meta {
   margin-top: 4px; font-size: 11px; color: var(--muted);
   display: flex; gap: 8px; flex-wrap: wrap; align-items: center;

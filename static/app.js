@@ -302,9 +302,10 @@ const SELECTED_DIRS = new Set();
 // Selected pod/team values (mirror mode only); empty set = all.
 const SELECTED_TEAMS = new Set();
 const SELECTED_PODS = new Set();
-// Selected run numbers / rounds (run mode only); empty set = all.
+// Selected run numbers / model / domain (run mode only); empty set = all.
 const SELECTED_RUNS = new Set();
-const SELECTED_ROUNDS = new Set();
+const SELECTED_RMODELS = new Set();
+const SELECTED_DOMAINS = new Set();
 // Parent session file keys whose linked subagent subtrees are hidden.
 // Kept outside renderSidebar so live polling does not reopen collapsed groups.
 const COLLAPSED_SUBAGENT_PARENTS = new Set();
@@ -443,12 +444,18 @@ function buildFilters() {
     host.append(makeDropdown("Model", modelGroups, SELECTED_MODELS, () => renderSidebar($("#search").value)));
   }
 
-  // ----- rounds (run mode: target-model round, e.g. sonnet-5 / opus-4.8) -----
-  const roundsList = [...new Set(SESSIONS.map((s) => s.round).filter(Boolean))];
-  for (const v of [...SELECTED_ROUNDS]) if (!roundsList.includes(v)) SELECTED_ROUNDS.delete(v);
-  if (roundsList.length > 1) {
-    const items = roundsList.map((r) => ({ value: r, label: r }));
-    host.append(makeDropdown("Round", [{ label: "", items }], SELECTED_ROUNDS, () => renderSidebar($("#search").value)));
+  // ----- model then domain (run mode: the {model}×{domain} combos) -----
+  const modelsList = [...new Set(SESSIONS.map((s) => s.round_model).filter(Boolean))].sort();
+  for (const v of [...SELECTED_RMODELS]) if (!modelsList.includes(v)) SELECTED_RMODELS.delete(v);
+  if (modelsList.length) {
+    const items = modelsList.map((m) => ({ value: m, label: m }));
+    host.append(makeDropdown("Model", [{ label: "", items }], SELECTED_RMODELS, () => renderSidebar($("#search").value)));
+  }
+  const domainsList = [...new Set(SESSIONS.map((s) => s.domain).filter(Boolean))].sort();
+  for (const v of [...SELECTED_DOMAINS]) if (!domainsList.includes(v)) SELECTED_DOMAINS.delete(v);
+  if (domainsList.length) {
+    const items = domainsList.map((d) => ({ value: d, label: d }));
+    host.append(makeDropdown("Domain", [{ label: "", items }], SELECTED_DOMAINS, () => renderSidebar($("#search").value)));
   }
 
   // ----- runs (run mode: run1..run10, numeric order) -----
@@ -491,6 +498,19 @@ function renderSidebar(query) {
   list.innerHTML = "";
   const q = query.trim().toLowerCase();
 
+  // Run mode drills down model → domain: don't dump every run at once. Until the
+  // reader picks a Model (or narrows another way / searches), show a prompt.
+  const runMode = SESSIONS.some((s) => s.round_model);
+  const scoped = q || SELECTED_RMODELS.size || SELECTED_DOMAINS.size ||
+    SELECTED_RUNS.size || SELECTED_TEAMS.size;
+  if (runMode && !scoped) {
+    list.append(el("div", { class: "sidebar-hint" },
+      "Pick a Model (then Domain) above to list its runs. " +
+      SESSIONS.length + " transcripts hidden."));
+    $("#sidebar-stats").textContent = SESSIONS.length + " transcripts · pick a Model to begin";
+    return;
+  }
+
   const matches = SESSIONS.filter((s) => {
     if (AGENT_FILTER !== "all" && s.agent !== AGENT_FILTER) return false;
     if (SELECTED_MODELS.size && !SELECTED_MODELS.has(s.model || "")) return false;
@@ -498,7 +518,8 @@ function renderSidebar(query) {
     if (SELECTED_TEAMS.size && !SELECTED_TEAMS.has(s.team || "")) return false;
     if (SELECTED_PODS.size && !SELECTED_PODS.has(s.pod || "")) return false;
     if (SELECTED_RUNS.size && !SELECTED_RUNS.has(s.run || "")) return false;
-    if (SELECTED_ROUNDS.size && !SELECTED_ROUNDS.has(s.round || "")) return false;
+    if (SELECTED_RMODELS.size && !SELECTED_RMODELS.has(s.round_model || "")) return false;
+    if (SELECTED_DOMAINS.size && !SELECTED_DOMAINS.has(s.domain || "")) return false;
     if (!q) return true;
     const metaHit = (
       s.title + " " + (s.original_title || "") + " " + (s.ai_title || "") + " " +
