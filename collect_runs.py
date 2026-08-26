@@ -129,6 +129,45 @@ def _write_lost(run: str, red_dir: Path, note: str) -> None:
     (red_dir / "_LOST.jsonl").write_text(json.dumps(rec) + "\n")
 
 
+# .mo_archive combo dir -> viewer round label. opus_4_8_math is intentionally
+# omitted: it's kept as the richer opus48-math round (red + blue×5 + green).
+MO_COMBOS = {
+    "sonnet_5_code_runs": "sonnet5-code",
+    "sonnet_5_math_runs": "sonnet5-math",
+    "opus_4_8_code_runs": "opus48-code",
+}
+MO_ARCHIVE = "/workspace/.mo_archive"
+
+
+def collect_mo_archive(red: dict, out_base: Path) -> None:
+    """Stage the red-only .mo_archive combos (red2's consolidated store).
+
+    Each combo holds transcripts/<run>/*.jsonl plus wrap folders named
+    ``…run<N>_<STATUS>`` — we mirror the transcripts by run and read the status.
+    """
+    if red is None:
+        _log("archive: no red pod")
+        return
+    for combo, round_label in MO_COMBOS.items():
+        status: dict[str, str] = {}
+        for folder in _remote_lines(red, f"ls -1 {MO_ARCHIVE}/{combo} 2>/dev/null"):
+            if folder == "transcripts" or folder.startswith(("_", ".")):
+                continue
+            m = re.search(r"run(\d+)_(.+)$", folder)
+            if m:
+                status.setdefault(f"run{m.group(1)}", m.group(2))
+        for td in _remote_lines(red, f"ls -1 {MO_ARCHIVE}/{combo}/transcripts 2>/dev/null"):
+            m = re.search(r"run(\d+)", td)
+            run = f"run{m.group(1)}" if m else td
+            dest = out_base / round_label / run / "red"
+            if _pull(red, f"{MO_ARCHIVE}/{combo}/transcripts", [td], dest):
+                if run in status:
+                    (out_base / round_label / run).mkdir(parents=True, exist_ok=True)
+                    (out_base / round_label / run / "status.txt").write_text(status[run])
+                _log(f"{round_label} {run}: red ({status.get(run, '?')})")
+    _log("archive: done")
+
+
 def collect_sonnet5(red: dict, out: Path) -> None:
     """Stage the sonnet-5 round: red-only, auto-discovered, each run status-badged.
 
@@ -164,12 +203,26 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", type=Path, default=Path("pods.json"))
     ap.add_argument("--out", type=Path, default=Path("runs_mirror"))
-    ap.add_argument("--round", default="opus48", choices=["opus48", "sonnet5"],
-                    help="which round to stage (default opus48)")
+    ap.add_argument("--round", default="opus48",
+                    choices=["opus48", "sonnet5", "archive"],
+                    help="stage a round; 'archive' stages the 4-combo .mo_archive (red-only)")
+    ap.add_argument("--pod", default="", help="crawl a specific red pod by id (e.g. red2)")
     ap.add_argument("--runs", default="", help="comma list to limit (default: all)")
     args = ap.parse_args()
 
     pods = json.loads(args.config.expanduser().read_text()).get("pods", [])
+
+    if args.round == "archive":
+        red = None
+        if args.pod:
+            red = next((p for p in pods if p.get("id") == args.pod and _reachable(p)), None)
+            if red:
+                _log(f"archive: using {red['id']} ({red['host']}:{red['port']})")
+        red = red or _pick(pods, "red")
+        args.out.mkdir(parents=True, exist_ok=True)
+        collect_mo_archive(red, args.out)
+        return
+
     red = _pick(pods, "red")
     out = args.out / args.round
     out.mkdir(parents=True, exist_ok=True)

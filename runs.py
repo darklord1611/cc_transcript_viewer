@@ -39,9 +39,18 @@ _LOCK = threading.RLock()
 # Role → the badge/label shown in the sidebar; also the child ordering.
 _TEAM_BY_ROLE = {"organism": "red", "audit": "blue", "eval": "green"}
 
-# Round dir name → (display label, sort order). Newer rounds sort first. Unknown
-# rounds fall back to their dir name and sort last.
-_ROUND_META = {"sonnet5": ("sonnet-5", 0), "opus48": ("opus-4.8", 1)}
+# Round dir name → (display label, sort order). Rounds are the {model}×{domain}
+# combos of the red-team archive; newer/sonnet first. Unknown rounds fall back to
+# their dir name and sort last.
+_ROUND_META = {
+    "sonnet5-code": ("sonnet-5 · code", 0),
+    "sonnet5-math": ("sonnet-5 · math", 1),
+    "opus48-code": ("opus-4.8 · code", 2),
+    "opus48-math": ("opus-4.8 · math", 3),
+    # legacy single-domain labels (kept for back-compat)
+    "sonnet5": ("sonnet-5", 4),
+    "opus48": ("opus-4.8", 5),
+}
 
 
 def configure(runs_dir) -> None:

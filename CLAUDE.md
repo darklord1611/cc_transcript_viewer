@@ -136,21 +136,27 @@ blue audits + green eval nested beneath (reusing the existing sub-agent nesting 
 are organized on their separate `/workspace` volumes (see
 `AutoSandbag/plans/ARTIFACTS_INDEX.md`): the run number is the unifying key.
 
-Layout is `runs_mirror/<round>/run<N>/{red,blue,green}/` — one round dir per target
-model (`opus48`, `sonnet5`, …; run numbers repeat across rounds so the round
-namespaces them). `runs.py` `_ROUND_META` sets each round's label + sort order
-(newer first). A round may be red-only (sonnet-5 largely refused the task): each run
+Layout is `runs_mirror/<round>/run<N>/{red,blue,green}/` — one round dir per
+{model}×{domain} combo (`sonnet5-code`, `sonnet5-math`, `opus48-code`, `opus48-math`;
+run numbers repeat across rounds so the round namespaces them). `runs.py`
+`_ROUND_META` sets each round's label + sort order (sonnet first). Most combos are
+red-only (from the `.mo_archive` consolidation); `opus48-math` is the one with full
+red→blue×5→green nesting. A round may be red-only (sonnet-5 largely refused the task): each run
 carries an optional `status.txt` (e.g. `REFUSED_AUP`, `ORGANISM`) shown as a badge.
 Frontend adds **Round** + **Run** filters and round/role/status/LOST badges.
 
 - **`collect_runs.py --round <name>`** stages a round into
-  `runs_mirror/<round>/run<N>/{red,blue,green}/` over SSH. `--round opus48` (default):
-  blue auto-discovered (already numbered on the audits volume); red/green mapped
-  run→slug via `RED_MAP`/`GREEN_MAP` (from `MAPPING.md` / `GREEN_TRANSCRIPTS.md`); a
-  lost red transcript (red3/red5 shut down first) gets a `_LOST.jsonl` placeholder
-  (→ LOST badge). `--round sonnet5`: red-only, auto-globs
-  `/workspace/agent_transcripts/*/-root-sonnet-5-run<N>/` and writes each run's outcome
-  (from its `sonnet_5_run<N>_<STATUS>` folder) to `status.txt`.
+  `runs_mirror/<round>/run<N>/{red,blue,green}/` over SSH.
+  - `--round archive --pod red2` (primary): stages the 3 red-only combos of the
+    consolidated red-team store `/workspace/.mo_archive/` (see its `STRUCTURE.md`) —
+    `sonnet_5_code_runs`→`sonnet5-code`, `sonnet_5_math_runs`→`sonnet5-math`,
+    `opus_4_8_code_runs`→`opus48-code` (`MO_COMBOS`). Each combo's
+    `transcripts/<run>/` is mirrored by run number, with the outcome parsed from its
+    `…run<N>_<STATUS>` wrap folder into `status.txt`.
+  - `opus_4_8_math` is intentionally kept as the richer **opus48-math** round (red +
+    blue×5 + green) staged by `--round opus48`: blue auto-discovered, red/green mapped
+    run→slug via `RED_MAP`/`GREEN_MAP`, lost red → `_LOST.jsonl` placeholder.
+  - `--round sonnet5` is the older single-dir sonnet-5 grab (superseded by `archive`).
 - **`runs.py`** is the viewer glue: enumerate `run<N>/` dirs (plus named controls like
   `overt`, sorted after the numbered runs), parse each transcript with claude_parser,
   and tag `run`/`team`/`role`, linking blue/green as children of the red parent.

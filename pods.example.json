@@ -55,6 +55,15 @@
       "key": "~/.ssh/id_ed25519"
     },
     {
+      "id": "red7",
+      "team": "red",
+      "label": "red7",
+      "host": "POD_PUBLIC_IP",
+      "port": 22222,
+      "user": "root",
+      "key": "~/.ssh/id_ed25519"
+    },
+    {
       "id": "blue1",
       "team": "blue",
       "label": "blue1",
