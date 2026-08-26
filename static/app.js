@@ -306,6 +306,8 @@ const SELECTED_PODS = new Set();
 const SELECTED_RUNS = new Set();
 const SELECTED_RMODELS = new Set();
 const SELECTED_DOMAINS = new Set();
+// Show only green-gated PASSED organisms (and their nested children).
+let PASSED_ONLY = false;
 // Parent session file keys whose linked subagent subtrees are hidden.
 // Kept outside renderSidebar so live polling does not reopen collapsed groups.
 const COLLAPSED_SUBAGENT_PARENTS = new Set();
@@ -449,6 +451,14 @@ function buildFilters() {
     }
   }
 
+  // ----- passed-only toggle (run mode: the 15 green-gated organisms) -----
+  if (runMode && SESSIONS.some((s) => s.passed)) {
+    const cb = el("input", { type: "checkbox" });
+    cb.checked = PASSED_ONLY;
+    cb.addEventListener("change", () => { PASSED_ONLY = cb.checked; renderSidebar($("#search").value); });
+    host.append(el("label", { class: "passed-toggle", title: "Show only green-gated PASSED organisms" }, cb, "✓ Passed only"));
+  }
+
   // ----- model then domain (run mode: the {model}×{domain} combos) -----
   const modelsList = [...new Set(SESSIONS.map((s) => s.round_model).filter(Boolean))].sort();
   for (const v of [...SELECTED_RMODELS]) if (!modelsList.includes(v)) SELECTED_RMODELS.delete(v);
@@ -506,7 +516,7 @@ function renderSidebar(query) {
   // Run mode drills down model → domain: don't dump every run at once. Until the
   // reader picks a Model (or narrows another way / searches), show a prompt.
   const runMode = SESSIONS.some((s) => s.round_model);
-  const scoped = q || SELECTED_RMODELS.size || SELECTED_DOMAINS.size ||
+  const scoped = q || PASSED_ONLY || SELECTED_RMODELS.size || SELECTED_DOMAINS.size ||
     SELECTED_RUNS.size || SELECTED_TEAMS.size;
   if (runMode && !scoped) {
     list.append(el("div", { class: "sidebar-hint" },
@@ -516,7 +526,11 @@ function renderSidebar(query) {
     return;
   }
 
+  // Passed-only keeps the 15 organisms and their nested green/blue children.
+  const passedFiles = PASSED_ONLY ? new Set(SESSIONS.filter((s) => s.passed).map((s) => s.file)) : null;
+
   const matches = SESSIONS.filter((s) => {
+    if (PASSED_ONLY && !s.passed && !passedFiles.has(s.parent_file)) return false;
     if (AGENT_FILTER !== "all" && s.agent !== AGENT_FILTER) return false;
     if (SELECTED_MODELS.size && !SELECTED_MODELS.has(s.model || "")) return false;
     if (SELECTED_DIRS.size && !SELECTED_DIRS.has(s.cwd || "")) return false;
@@ -602,7 +616,7 @@ function renderSidebar(query) {
     const tsForRel = s.last_ts || (s.mtime ? new Date(s.mtime * 1000).toISOString() : null);
     const item = el(
       "div",
-      { class: "session-item" + (s.is_subagent ? " subagent" : ""), "data-file": s.file },
+      { class: "session-item" + (s.is_subagent ? " subagent" : "") + (s.passed ? " passed" : ""), "data-file": s.file },
       el(
         "div",
         { class: "session-toprow" },
@@ -613,6 +627,12 @@ function renderSidebar(query) {
           : null,
         s.run
           ? el("span", { class: "run-tag", title: "Run " + s.run }, s.run)
+          : null,
+        s.passed
+          ? el("span", {
+              class: "passed-tag",
+              title: (s.hf_repo ? "HF: " + s.hf_repo + "\n" : "") + (s.pass_note || ""),
+            }, "✓ PASSED" + (s.pass_metric ? " · " + s.pass_metric : ""))
           : null,
         s.team
           ? el("span", { class: "team-tag team-" + s.team, title: "Team " + s.team + (s.pod ? " · pod " + s.pod : "") }, s.team)

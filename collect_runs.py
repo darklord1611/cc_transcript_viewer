@@ -139,6 +139,35 @@ MO_COMBOS = {
 MO_ARCHIVE = "/workspace/.mo_archive"
 
 
+def ensure_passed_placeholders(out_base: Path) -> None:
+    """For each green-gated PASS in passed_organisms.json whose red transcript is
+    absent (build transcript lost), write a `_LOST.jsonl` placeholder so the
+    published organism still shows (with a PASSED + LOST badge)."""
+    pf = Path(__file__).parent / "passed_organisms.json"
+    try:
+        passed = {k: v for k, v in json.loads(pf.read_text()).items() if isinstance(v, dict)}
+    except (OSError, ValueError):
+        return
+    for round_dir, runs in passed.items():
+        base = out_base / round_dir
+        if not base.exists():
+            continue
+        for run, info in runs.items():
+            red = base / run / "red"
+            if red.exists() and any(red.rglob("*.jsonl")):
+                continue
+            red.mkdir(parents=True, exist_ok=True)
+            content = (f"# ⚠️ RED TRANSCRIPT LOST — {round_dir} {run}\n\n"
+                       f"This organism **green-gated PASS ({info.get('metric')} {info.get('value')})** and is "
+                       f"published to HF as `{info.get('hf')}`, but the red build agent's session log was not "
+                       f"harvested before the pod was shut down.\n\nNote: {info.get('note', '')}")
+            rec = {"type": "user", "timestamp": "2026-08-26T00:00:00Z",
+                   "cwd": f"{round_dir} {run} · organism PASSED (transcript lost)",
+                   "message": {"role": "user", "content": content}}
+            (red / "_LOST.jsonl").write_text(json.dumps(rec) + "\n")
+            _log(f"passed-placeholder: {round_dir}/{run}")
+
+
 def collect_mo_archive(red: dict, out_base: Path) -> None:
     """Stage the red-only .mo_archive combos (red2's consolidated store).
 
@@ -221,6 +250,7 @@ def main() -> None:
         red = red or _pick(pods, "red")
         args.out.mkdir(parents=True, exist_ok=True)
         collect_mo_archive(red, args.out)
+        ensure_passed_placeholders(args.out)
         return
 
     red = _pick(pods, "red")

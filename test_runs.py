@@ -82,6 +82,17 @@ class RunsModeTest(unittest.TestCase):
         run1 = next(s for s in parents if s["run"] == "run1")
         self.assertEqual((run1["round_model"], run1["domain"]), ("opus-4.8", "math"))
 
+    def test_passed_organism_marked(self):
+        out = server.list_sessions()
+        # opus48-math run1 is a real green-gated pass in passed_organisms.json.
+        run1 = next(s for s in out if s["round"] == "opus-4.8 · math" and s["run"] == "run1")
+        self.assertTrue(run1.get("passed"))
+        self.assertIn("gap", run1.get("pass_metric", ""))
+        self.assertTrue(run1.get("hf_repo"))
+        # a run not in the pass list carries no marker
+        s5 = next(s for s in out if s["round_model"] == "sonnet-5" and s["run"] == "run7")
+        self.assertNotIn("passed", s5)
+
     def test_sonnet_status_badge(self):
         s5 = next(s for s in server.list_sessions() if s["round_model"] == "sonnet-5")
         self.assertEqual(s5["status"], "REFUSED_AUP")
