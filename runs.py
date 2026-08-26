@@ -27,6 +27,7 @@ reads local files only — no network, same as the parsers it drives.
 """
 from __future__ import annotations
 
+import json
 import re
 import threading
 from pathlib import Path
@@ -35,6 +36,16 @@ import claude_parser as claude
 
 RUNS_DIR: Path | None = None
 _LOCK = threading.RLock()
+
+# Green-gated PASSING organisms (round -> run -> {metric, value, note, hf}),
+# loaded once from passed_organisms.json beside this module. Drives the ✓ PASSED
+# badge on a run's red-organism row.
+_PASSED_FILE = Path(__file__).parent / "passed_organisms.json"
+try:
+    _PASSED = {k: v for k, v in json.loads(_PASSED_FILE.read_text()).items()
+               if isinstance(v, dict)}
+except (OSError, ValueError):
+    _PASSED = {}
 
 # Role → the badge/label shown in the sidebar; also the child ordering.
 _TEAM_BY_ROLE = {"organism": "red", "audit": "blue", "eval": "green"}
@@ -198,6 +209,12 @@ def collect() -> list[dict]:
                 status = run_dir / "status.txt"
                 if status.exists():
                     parent["status"] = status.read_text().strip()[:40]
+                passed = _PASSED.get(round_dir.name, {}).get(run)
+                if passed:
+                    parent["passed"] = True
+                    parent["pass_metric"] = f"{passed.get('metric', '')} {passed.get('value', '')}".strip()
+                    parent["pass_note"] = passed.get("note", "")
+                    parent["hf_repo"] = passed.get("hf", "")
                 _emit(parent)
                 pf, pid = parent["file"], parent["id"]
                 # Children nest under the red organism as: green eval, then the

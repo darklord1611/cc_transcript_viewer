@@ -560,6 +560,20 @@ body.outline-collapsed #nav-buttons { right: 24px; }
   padding: 18px 14px; color: var(--muted); font-size: 13px; line-height: 1.5;
   text-align: center;
 }
+/* Green-gated PASSED organism: distinctive badge + row accent. */
+.passed-tag {
+  flex: none;
+  font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em;
+  padding: 2px 7px; border-radius: 5px; line-height: 1.4;
+  background: #1f9d55; color: #fff; box-shadow: 0 0 0 1px rgba(31,157,85,.5);
+}
+.session-item.passed { border-left: 3px solid #1f9d55; }
+.passed-toggle {
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+  font-size: 12px; font-weight: 700; color: #1f9d55;
+  padding: 4px 9px; border: 1px solid #1f9d55; border-radius: 6px;
+}
+.passed-toggle input { accent-color: #1f9d55; }
 .session-meta {
   margin-top: 4px; font-size: 11px; color: var(--muted);
   display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
