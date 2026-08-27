@@ -308,6 +308,8 @@ const SELECTED_RMODELS = new Set();
 const SELECTED_DOMAINS = new Set();
 // Show only green-gated PASSED organisms (and their nested children).
 let PASSED_ONLY = false;
+// Hide contaminated (invalid-result) runs.
+let HIDE_CONTAM = false;
 // Parent session file keys whose linked subagent subtrees are hidden.
 // Kept outside renderSidebar so live polling does not reopen collapsed groups.
 const COLLAPSED_SUBAGENT_PARENTS = new Set();
@@ -339,6 +341,7 @@ function sessionMtime(file) {
 // Run-outcome badge colour bucket (sonnet-5 statuses like REFUSED_AUP, ORGANISM).
 function statusClass(s) {
   const t = String(s || "").toUpperCase();
+  if (t.includes("CONTAM")) return "contaminated";
   if (t.includes("ORGANISM")) return "organism";
   if (t.includes("REFUSED") || t.includes("STALLED")) return "refused";
   return "warn";
@@ -458,6 +461,12 @@ function buildFilters() {
     cb.addEventListener("change", () => { PASSED_ONLY = cb.checked; renderSidebar($("#search").value); });
     host.append(el("label", { class: "passed-toggle", title: "Show only green-gated PASSED organisms" }, cb, "✓ Passed only"));
   }
+  if (runMode && SESSIONS.some((s) => s.contaminated)) {
+    const cb = el("input", { type: "checkbox" });
+    cb.checked = HIDE_CONTAM;
+    cb.addEventListener("change", () => { HIDE_CONTAM = cb.checked; renderSidebar($("#search").value); });
+    host.append(el("label", { class: "contam-toggle", title: "Hide contaminated (invalid-result) runs" }, cb, "⚠ Hide contaminated"));
+  }
 
   // ----- model then domain (run mode: the {model}×{domain} combos) -----
   const modelsList = [...new Set(SESSIONS.map((s) => s.round_model).filter(Boolean))].sort();
@@ -531,6 +540,7 @@ function renderSidebar(query) {
 
   const matches = SESSIONS.filter((s) => {
     if (PASSED_ONLY && !s.passed && !passedFiles.has(s.parent_file)) return false;
+    if (HIDE_CONTAM && s.contaminated) return false;
     if (AGENT_FILTER !== "all" && s.agent !== AGENT_FILTER) return false;
     if (SELECTED_MODELS.size && !SELECTED_MODELS.has(s.model || "")) return false;
     if (SELECTED_DIRS.size && !SELECTED_DIRS.has(s.cwd || "")) return false;
@@ -616,7 +626,7 @@ function renderSidebar(query) {
     const tsForRel = s.last_ts || (s.mtime ? new Date(s.mtime * 1000).toISOString() : null);
     const item = el(
       "div",
-      { class: "session-item" + (s.is_subagent ? " subagent" : "") + (s.passed ? " passed" : ""), "data-file": s.file },
+      { class: "session-item" + (s.is_subagent ? " subagent" : "") + (s.passed ? " passed" : "") + (s.contaminated ? " contaminated" : ""), "data-file": s.file },
       el(
         "div",
         { class: "session-toprow" },
