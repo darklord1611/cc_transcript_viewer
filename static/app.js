@@ -308,8 +308,8 @@ const SELECTED_RMODELS = new Set();
 const SELECTED_DOMAINS = new Set();
 // Show only green-gated PASSED organisms (and their nested children).
 let PASSED_ONLY = false;
-// Hide contaminated (invalid-result) runs.
-let HIDE_CONTAM = false;
+// Show only contaminated (invalid-result) runs.
+let CONTAM_ONLY = false;
 // Parent session file keys whose linked subagent subtrees are hidden.
 // Kept outside renderSidebar so live polling does not reopen collapsed groups.
 const COLLAPSED_SUBAGENT_PARENTS = new Set();
@@ -463,9 +463,9 @@ function buildFilters() {
   }
   if (runMode && SESSIONS.some((s) => s.contaminated)) {
     const cb = el("input", { type: "checkbox" });
-    cb.checked = HIDE_CONTAM;
-    cb.addEventListener("change", () => { HIDE_CONTAM = cb.checked; renderSidebar($("#search").value); });
-    host.append(el("label", { class: "contam-toggle", title: "Hide contaminated (invalid-result) runs" }, cb, "⚠ Hide contaminated"));
+    cb.checked = CONTAM_ONLY;
+    cb.addEventListener("change", () => { CONTAM_ONLY = cb.checked; renderSidebar($("#search").value); });
+    host.append(el("label", { class: "contam-toggle", title: "Show only contaminated (invalid-result) runs" }, cb, "⚠ Contaminated only"));
   }
 
   // ----- model then domain (run mode: the {model}×{domain} combos) -----
@@ -525,8 +525,8 @@ function renderSidebar(query) {
   // Run mode drills down model → domain: don't dump every run at once. Until the
   // reader picks a Model (or narrows another way / searches), show a prompt.
   const runMode = SESSIONS.some((s) => s.round_model);
-  const scoped = q || PASSED_ONLY || SELECTED_RMODELS.size || SELECTED_DOMAINS.size ||
-    SELECTED_RUNS.size || SELECTED_TEAMS.size;
+  const scoped = q || PASSED_ONLY || CONTAM_ONLY || SELECTED_RMODELS.size ||
+    SELECTED_DOMAINS.size || SELECTED_RUNS.size || SELECTED_TEAMS.size;
   if (runMode && !scoped) {
     list.append(el("div", { class: "sidebar-hint" },
       "Pick a Model (then Domain) above to list its runs. " +
@@ -535,12 +535,13 @@ function renderSidebar(query) {
     return;
   }
 
-  // Passed-only keeps the 15 organisms and their nested green/blue children.
+  // Passed-only / contaminated-only keep those runs and their nested children.
   const passedFiles = PASSED_ONLY ? new Set(SESSIONS.filter((s) => s.passed).map((s) => s.file)) : null;
+  const contamFiles = CONTAM_ONLY ? new Set(SESSIONS.filter((s) => s.contaminated).map((s) => s.file)) : null;
 
   const matches = SESSIONS.filter((s) => {
     if (PASSED_ONLY && !s.passed && !passedFiles.has(s.parent_file)) return false;
-    if (HIDE_CONTAM && s.contaminated) return false;
+    if (CONTAM_ONLY && !s.contaminated && !contamFiles.has(s.parent_file)) return false;
     if (AGENT_FILTER !== "all" && s.agent !== AGENT_FILTER) return false;
     if (SELECTED_MODELS.size && !SELECTED_MODELS.has(s.model || "")) return false;
     if (SELECTED_DIRS.size && !SELECTED_DIRS.has(s.cwd || "")) return false;
