@@ -2307,3 +2307,39 @@ window.addEventListener("hashchange", () => {
 
 buildThemePicker();
 loadSessions().then(openFromHash);
+
+// ---------- Method-trajectories report tab ----------
+// A configured markdown file (server --report) shown as a second top-level view.
+// A body.view-report class flips the UI from the transcript browser to the
+// rendered report (see style.css); the tab appears only if /api/report has one.
+(function () {
+  const tabTranscripts = $('[data-view="transcripts"]');
+  const tabReport = $('[data-view="report"]');
+  const reportEl = $("#report");
+  if (!tabTranscripts || !tabReport || !reportEl) return;
+  let markdown = null, rendered = false;
+
+  function setView(view) {
+    const isReport = view === "report";
+    document.body.classList.toggle("view-report", isReport);
+    tabReport.classList.toggle("on", isReport);
+    tabTranscripts.classList.toggle("on", !isReport);
+    if (isReport && markdown != null && !rendered) {
+      reportEl.innerHTML = md(markdown);
+      rendered = true;
+      reportEl.scrollTop = 0;
+    }
+  }
+  tabTranscripts.addEventListener("click", () => setView("transcripts"));
+  tabReport.addEventListener("click", () => setView("report"));
+
+  fetch("/api/report")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      if (!d || !d.markdown) return;
+      markdown = d.markdown;
+      if (d.name) tabReport.textContent = d.name;
+      tabReport.hidden = false;
+    })
+    .catch(() => {});
+})();

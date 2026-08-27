@@ -63,6 +63,11 @@ HOST_CHECK = True
 AUTH_TOKEN: str | None = None
 AUTH_COOKIE = "cc_auth"
 
+# Optional single markdown file surfaced as a "report" tab in the viewer
+# (set via --report). One configured file, not an arbitrary path.
+REPORT_FILE: Path | None = None
+REPORT_NAME = "Method trajectories"
+
 # Set by main() so handlers can reach it.
 CUSTOM_NAMES_FILE = DEFAULT_CUSTOM_NAMES_FILE
 CACHE_FILE = Path.home() / ".cache" / "transcript_viewer" / "summaries.json"
@@ -747,6 +752,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, status=500)
             return
 
+        if route == "/api/report":
+            if REPORT_FILE is None:
+                self._send_json({"error": "no report configured"}, status=404)
+                return
+            try:
+                markdown = REPORT_FILE.read_text(encoding="utf-8")
+            except OSError:
+                self._send_json({"error": "report unreadable"}, status=404)
+                return
+            self._send_json({"name": REPORT_NAME, "markdown": markdown})
+            return
+
         if route == "/api/session-state":
             qs = parse_qs(parsed.query)
             file_arg = qs.get("file", [""])[0]
@@ -912,7 +929,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global CUSTOM_NAMES_FILE, HOST_CHECK, AUTH_TOKEN
+    global CUSTOM_NAMES_FILE, HOST_CHECK, AUTH_TOKEN, REPORT_FILE, REPORT_NAME
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", type=int, default=3132)
     ap.add_argument("--host", default=DEFAULT_HOST)
@@ -962,9 +979,22 @@ def main():
         help="require this shared secret on every request (or set CC_VIEWER_TOKEN). "
         "Needed to safely expose the viewer on a public --host.",
     )
+    ap.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="markdown file to surface as a report tab in the viewer",
+    )
+    ap.add_argument(
+        "--report-name",
+        default=REPORT_NAME,
+        help="label for the report tab (default: 'Method trajectories')",
+    )
     args = ap.parse_args()
 
     AUTH_TOKEN = args.auth_token or os.environ.get("CC_VIEWER_TOKEN") or None
+    REPORT_FILE = args.report.expanduser() if args.report else None
+    REPORT_NAME = args.report_name
 
     CUSTOM_NAMES_FILE = args.custom_names_file.expanduser()
     claude.configure(args.projects_dir)
