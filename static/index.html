@@ -54,6 +54,10 @@
           </div>
           <button id="collapse-sidebar" class="panel-toggle" title="Hide sessions" aria-label="Hide sessions">«</button>
         </div>
+        <div id="view-tabs" class="view-tabs">
+          <button class="view-tab on" data-view="transcripts" type="button">Transcripts</button>
+          <button class="view-tab" data-view="report" type="button" hidden>Method trajectories</button>
+        </div>
         <input id="search" type="search" placeholder="Search title, project, id, or content…" autocomplete="off" />
         <div id="filter-row">
           <button class="filter-chip on" data-agent="all">All</button>
@@ -80,6 +84,7 @@
         </ul>
       </div>
       <div id="transcript" hidden></div>
+      <div id="report" class="report md" hidden><div class="empty-note">Loading report…</div></div>
       <div id="nav-buttons" hidden>
         <button id="nav-prev" class="nav-btn" title="Previous user message">↑</button>
         <button id="nav-next" class="nav-btn" title="Next user message">↓</button>

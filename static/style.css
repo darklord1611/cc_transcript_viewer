@@ -570,6 +570,41 @@ body.outline-collapsed #nav-buttons { right: 24px; }
   padding: 18px 14px; color: var(--muted); font-size: 13px; line-height: 1.5;
   text-align: center;
 }
+/* ---- Top-level view tabs (Transcripts / report) ---- */
+.view-tabs { display: flex; gap: 6px; margin: 8px 0 2px; }
+.view-tab {
+  flex: 1; padding: 6px 8px; font-size: 12.5px; font-weight: 600;
+  color: var(--muted); background: var(--bg); cursor: pointer;
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.view-tab.on { color: var(--fg); background: var(--panel, var(--bg)); border-color: var(--fg); }
+/* When the report view is active, hide the transcript UI and show the report. */
+body.view-report #search,
+body.view-report #filter-row,
+body.view-report #filter-dropdowns,
+body.view-report #sidebar-stats,
+body.view-report #session-list,
+body.view-report #welcome,
+body.view-report #transcript,
+body.view-report #nav-buttons,
+body.view-report #outline,
+body.view-report #show-outline { display: none !important; }
+body:not(.view-report) #report { display: none; }
+/* ---- Rendered report ---- */
+.report {
+  display: block; height: 100%; overflow-y: auto;
+  padding: 28px 40px; max-width: 900px; margin: 0 auto;
+  line-height: 1.6; font-size: 14.5px;
+}
+.report h1 { font-size: 22px; margin: 4px 0 12px; }
+.report h2 { font-size: 18px; margin: 26px 0 10px; padding-bottom: 5px; border-bottom: 1px solid var(--border); }
+.report h3 { font-size: 15px; margin: 18px 0 8px; color: var(--muted); }
+.report code { font-family: var(--mono); font-size: 12.5px; background: var(--bg); padding: 1px 4px; border-radius: 4px; }
+.report pre { overflow-x: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; }
+.report table { border-collapse: collapse; margin: 10px 0; display: block; overflow-x: auto; }
+.report th, .report td { border: 1px solid var(--border); padding: 4px 9px; text-align: left; font-size: 13px; }
+.report li { margin: 3px 0; }
+.report hr { border: none; border-top: 1px solid var(--border); margin: 22px 0; }
 /* Green-gated PASSED organism: distinctive badge + row accent. */
 .passed-tag {
   flex: none;

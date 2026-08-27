@@ -169,6 +169,12 @@ Frontend adds **Round** + **Run** filters and round/role/status/LOST badges.
 
 Run mode takes precedence over `--mirror`/local when set. `runs_mirror/` is gitignored.
 
+**Report tab.** `--report <file.md>` surfaces one markdown file as a second top-level view
+(a "Transcripts / Method trajectories" tab pair in the sidebar header). Served by
+`GET /api/report` (one configured file, auth-gated like everything else); the frontend fetches
+it, shows the tab only if present, and renders it with the existing `md()` pipeline. A
+`body.view-report` class flips the UI between the transcript browser and the rendered report.
+
 ### Auth (public-endpoint token gate)
 
 `--auth-token <t>` / `CC_VIEWER_TOKEN` env turns on a shared-secret gate so the
