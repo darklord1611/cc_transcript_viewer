@@ -208,7 +208,14 @@ def collect() -> list[dict]:
                     parent["red_lost"] = True
                 status = run_dir / "status.txt"
                 if status.exists():
-                    parent["status"] = status.read_text().strip()[:40]
+                    text = status.read_text().strip()[:40]
+                    parent["status"] = text
+                    # Contaminated = invalid results (copied a prior organism).
+                    # A run that also REFUSED is categorized as a refusal, not
+                    # contamination (e.g. code run1 INVALID_CONTAMINATED_REFUSED).
+                    up = text.upper()
+                    if "CONTAM" in up and "REFUSED" not in up:
+                        parent["contaminated"] = True
                 passed = _PASSED.get(round_dir.name, {}).get(run)
                 if passed:
                     parent["passed"] = True

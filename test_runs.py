@@ -42,6 +42,12 @@ class RunsModeTest(unittest.TestCase):
         s5 = self.dir / "sonnet5-code"
         _mk(s5 / "run7" / "red" / "slug" / "s.jsonl", "sonnet red")
         (s5 / "run7" / "status.txt").write_text("REFUSED_AUP")
+        # A contaminated run, and a contaminated-but-refused one (NOT flagged).
+        # Numbers chosen not to collide with opus48-math's run1/run2/overt.
+        _mk(s5 / "run5" / "red" / "slug" / "c.jsonl", "contaminated")
+        (s5 / "run5" / "status.txt").write_text("INVALID_CONTAMINATED")
+        _mk(s5 / "run8" / "red" / "slug" / "cr.jsonl", "contam+refused")
+        (s5 / "run8" / "status.txt").write_text("INVALID_CONTAMINATED_REFUSED")
         runs.configure(self.dir)
 
     def tearDown(self):
@@ -93,8 +99,17 @@ class RunsModeTest(unittest.TestCase):
         s5 = next(s for s in out if s["round_model"] == "sonnet-5" and s["run"] == "run7")
         self.assertNotIn("passed", s5)
 
+    def test_contaminated_flag_excludes_refused(self):
+        out = server.list_sessions()
+        by = {(s["round"], s["run"]): s for s in out if not s["is_subagent"]}
+        # CONTAM (not refused) -> flagged; CONTAM+REFUSED -> not flagged.
+        self.assertTrue(by[("sonnet-5 · code", "run5")].get("contaminated"))
+        self.assertNotIn("contaminated", by[("sonnet-5 · code", "run8")])
+        self.assertNotIn("contaminated", by[("sonnet-5 · code", "run7")])
+
     def test_sonnet_status_badge(self):
-        s5 = next(s for s in server.list_sessions() if s["round_model"] == "sonnet-5")
+        s5 = next(s for s in server.list_sessions()
+                  if s["round_model"] == "sonnet-5" and s["run"] == "run7")
         self.assertEqual(s5["status"], "REFUSED_AUP")
 
     def test_run_order_controls_last(self):

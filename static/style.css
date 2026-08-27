@@ -556,6 +556,16 @@ body.outline-collapsed #nav-buttons { right: 24px; }
 .status-organism { background: #2e7d4f; }
 .status-refused { background: #b5651d; }
 .status-warn { background: #7a7a1f; }
+.status-contaminated { background: #7a2e2e; }
+/* Contaminated = invalid result: dim the row, gray the title. */
+.session-item.contaminated { opacity: .6; border-left: 3px solid #7a2e2e; }
+.session-item.contaminated .session-title { text-decoration: line-through; text-decoration-color: rgba(150,60,60,.6); }
+.contam-toggle {
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+  font-size: 12px; font-weight: 700; color: #b05656;
+  padding: 4px 9px; border: 1px solid #b05656; border-radius: 6px;
+}
+.contam-toggle input { accent-color: #b05656; }
 .sidebar-hint {
   padding: 18px 14px; color: var(--muted); font-size: 13px; line-height: 1.5;
   text-align: center;
