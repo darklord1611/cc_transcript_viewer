@@ -896,7 +896,7 @@ async function renameSession(data) {
     LAST_SIG = sessionsSignature(SESSIONS);
     await runSearch($("#search").value);
     markActive();
-    if (CURRENT_FILE === file) await renderTranscript(data, { keepScroll: true });
+    if (CURRENT_FILE === file) await renderTranscript(data, { live: true });
   } catch (e) {
     window.alert("Could not save transcript name: " + String(e));
   }
@@ -981,8 +981,12 @@ async function openSession(file, itemEl) {
 
 let RENDER_GENERATION = 0;
 
+// opts.live: a refresh of the open transcript. It renders into a detached
+// container and swaps in all at once, so the reader never sees the transcript
+// blank out and rebuild over several frames.
 function renderTranscript(data, opts = {}) {
-  const t = $("#transcript");
+  const live = $("#transcript");
+  const t = opts.live ? document.createElement("div") : live;
   t.innerHTML = "";
   CURRENT_AGENT = data.agent || "claude";
   LAST_RENDERED_TITLE = data.title || "";
@@ -1117,7 +1121,7 @@ function renderTranscript(data, opts = {}) {
     },
     progressFill
   );
-  if (events.length > 100) t.append(progress);
+  if (events.length > 100 && !opts.live) t.append(progress);
 
   const generation = ++RENDER_GENERATION;
   return new Promise((resolve) => {
@@ -1146,7 +1150,15 @@ function renderTranscript(data, opts = {}) {
       progress.remove();
       decorateMarkdownLinks(t, data);
       groupTurnRuns(t);
-      if (!opts.keepScroll) $("#main").scrollTop = 0;
+      if (opts.live) {
+        // Snapshot at swap time so toggles made while rendering aren't lost.
+        const view = captureView(live);
+        applyExpanded(view, t);
+        live.replaceChildren(...t.childNodes);
+        restoreScroll(view);
+      } else {
+        $("#main").scrollTop = 0;
+      }
       buildOutline();
       resolve(true);
     }
@@ -1193,23 +1205,26 @@ function groupTurnRuns(container) {
 // ---------- live transcript refresh (scroll- and state-preserving) ----------
 // Snapshot what the reader is looking at: scroll offset, whether they're pinned
 // to the bottom (so we can tail-follow), and which collapsible blocks are open.
-function captureView() {
+function captureView(container) {
   const main = $("#main");
   const atBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 40;
   const expanded = {};
   for (const sel of [".thinking-block", ".tool-block", ".status-block", ".instructions-block", ".branch-block"])
-    expanded[sel] = $$(sel).map((n) => !n.classList.contains("collapsed"));
+    expanded[sel] = $$(sel, container).map((n) => !n.classList.contains("collapsed"));
   return { top: main.scrollTop, atBottom, expanded };
 }
 
-// Re-apply a captured view after a full re-render. Existing blocks keep their
-// index (the transcript only grows by appending), so open/closed state sticks;
-// new blocks appended at the end stay collapsed.
-function restoreView(v) {
+// Re-apply captured open/closed state to a freshly rendered container.
+// Existing blocks keep their index (the transcript only grows by appending),
+// so state sticks; new blocks appended at the end stay collapsed.
+function applyExpanded(v, container) {
   for (const sel of Object.keys(v.expanded)) {
-    const nodes = $$(sel);
+    const nodes = $$(sel, container);
     v.expanded[sel].forEach((open, i) => { if (nodes[i]) nodes[i].classList.toggle("collapsed", !open); });
   }
+}
+
+function restoreScroll(v) {
   const main = $("#main");
   main.scrollTop = v.atBottom ? main.scrollHeight : v.top;
 }
@@ -1220,14 +1235,12 @@ async function refreshOpenTranscript(knownMtime = null) {
   if (transcriptRefreshInFlight) return;
   transcriptRefreshInFlight = true;
   const file = CURRENT_FILE;
-  const view = captureView();
   try {
     const res = await fetch("/api/session?file=" + encodeURIComponent(file));
     const data = await res.json();
     if (data.error || CURRENT_FILE !== file) return;
-    const rendered = await renderTranscript(data, { keepScroll: true });
+    const rendered = await renderTranscript(data, { live: true });
     if (rendered && CURRENT_FILE === file) {
-      restoreView(view);
       LAST_RENDERED_MTIME = knownMtime == null ? sessionMtime(file) : knownMtime;
     }
   } catch (e) { /* transient; try again next poll */ }

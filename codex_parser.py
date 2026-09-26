@@ -489,6 +489,14 @@ def _agent_label(meta: dict, thread_row: dict | None = None) -> str:
     return "codex"
 
 
+def _merge_session_meta(meta: dict, payload: dict) -> None:
+    """The first session_meta is this thread's own. A forked thread (e.g. a
+    spawned subagent) replays its parent's session_meta afterwards, which must
+    not overwrite identity fields such as id and source."""
+    for key, value in payload.items():
+        meta.setdefault(key, value)
+
+
 def _subagent_fields(meta: dict) -> dict:
     """Normalize Codex subagent identity and parent linkage from session_meta."""
     source = meta.get("source")
@@ -667,7 +675,7 @@ def _read_thread_rows() -> dict[str, dict]:
 # Bump when the summary computation changes, so cached summaries for
 # unchanged files are recomputed once (e.g. v2 taught the message counters
 # the ≥0.147 item_completed envelope).
-_SUMMARY_VERSION = 3
+_SUMMARY_VERSION = 4
 
 
 def session_summary(path: Path, thread_row: dict | None = None) -> dict:
@@ -699,7 +707,7 @@ def _session_summary_uncached(path: Path, thread_row: dict | None = None) -> dic
         typ = rec.get("type")
         payload = rec.get("payload") or {}
         if typ == "session_meta":
-            meta.update(payload)
+            _merge_session_meta(meta, payload)
         elif typ == "turn_context":
             model = model or payload.get("model", "")
         elif typ == "event_msg":
@@ -1054,7 +1062,7 @@ def parse_session(path: Path) -> dict:
     for rec in records:
         payload = rec.get("payload") or {}
         if rec.get("type") == "session_meta":
-            meta.update(payload)
+            _merge_session_meta(meta, payload)
         elif (msg := _record_message(rec)) is not None:
             # Real user prompts (either format), registered so their
             # response_item copies are recognized as repeats below. Message
@@ -1536,7 +1544,9 @@ def parse_session(path: Path) -> dict:
     else:
         events = _fold_turn_metadata(events, anchor_kinds={"user", "assistant"})
 
-    title = _first_user_message(records) or title
+    # Same fallback order as the summary, so the list and the open view agree
+    # (a mismatch makes the live poller re-render every tick).
+    title = _first_user_message(records) or title or "(untitled session)"
     if is_guardian:
         title = "Approval reviews"
     elif subagent_fields:

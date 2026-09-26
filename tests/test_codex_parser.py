@@ -201,6 +201,32 @@ class CodexGeneratedTitleTests(unittest.TestCase):
         self.assertEqual(data["title"], "a long initial request")
         self.assertEqual(data["ai_title"], "Summarize parser metadata")
 
+    def test_forked_subagent_keeps_own_meta_and_matching_titles(self):
+        # A spawned subagent replays its parent's session_meta after its own.
+        # The list and the open view must agree on the title, or the live
+        # poller re-renders the open transcript every tick.
+        records = [
+            {"timestamp": "2026-09-25T12:00:00Z", "type": "session_meta", "payload": {
+                "id": "child-1", "thread_source": "subagent",
+                "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent-1"}}},
+                "parent_thread_id": "parent-1",
+            }},
+            {"timestamp": "2026-09-25T12:00:00Z", "type": "session_meta", "payload": {
+                "id": "parent-1", "source": "cli",
+            }},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            _write_jsonl(path, records)
+            summary = codex.session_summary(path, None)
+            with mock.patch.object(codex, "_read_thread_rows", return_value={}):
+                data = codex.parse_session(path)
+
+        self.assertEqual(summary["id"], "child-1")
+        self.assertTrue(summary.get("is_subagent"))
+        self.assertEqual(data["id"], "child-1")
+        self.assertEqual(summary["title"], data["title"])
+
 
 class CodexOrchestrationTests(unittest.TestCase):
     """The JS-literal parser that unpacks generated `tools.name(...)` calls."""
