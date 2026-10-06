@@ -11,7 +11,7 @@
       // Solarized was replaced by the more distinct Botanical palette.
       const theme = savedTheme === "solarized" ? "botanical" : savedTheme;
       if (["warm", "paper", "botanical", "lavender", "sorbet", "night", "terminal",
-           "highlighter", "nineties", "system7", "bauhaus", "artdeco"].includes(theme)) {
+           "highlighter", "nineties", "system7", "bauhaus", "artdeco", "riso", "synthwave"].includes(theme)) {
         document.documentElement.dataset.theme = theme;
         if (theme !== savedTheme) localStorage.setItem("transcript-viewer:theme", theme);
       }

@@ -216,13 +216,14 @@ accumulated.
   clickable headings and highlights the one you're reading as you scroll. Floating **↑ / ↓** buttons
   jump to the previous/next user prompt, and **Jump to end** (in the transcript controls) skips to
   the bottom. Sidebar and outline panels can be collapsed.
-- **Twelve themes.** Warm, Paper, Botanical, and Lavender cover the quiet solid palettes; Night is
+- **Fourteen themes.** Warm, Paper, Botanical, and Lavender cover the quiet solid palettes; Night is
   the standard dark option. The playful set changes the UI as well as its colors: Sorbet uses soft
   pills, while Terminal uses crisp monospace controls.
   Highlighter and Nineties are the two intentionally odd options, with chunky offset borders and
   classic desktop bevels respectively. System 7 draws from historic Macintosh interfaces, while
-  Bauhaus and Art Deco add broader design-history options through geometry and double rules. All
-  are static—no theme animations. The choice is stored in the browser on that machine and restored
+  Bauhaus and Art Deco add broader design-history options through geometry and double rules. Riso
+  layers misregistered pink and teal ink offsets on cream paper, and Synthwave is a neon-glow dark
+  option. All are static—no theme animations. The choice is stored in the browser on that machine and restored
   before the page paints.
 - **Live updates.** The sidebar refreshes about once a second, while an open on-disk transcript is
   checked about three times a second, so an in-progress session tails quickly without disturbing

@@ -42,6 +42,8 @@ const THEMES = [
   { id: "system7", name: "System 7", colors: ["#f7f7f7", "#d7d7d7", "#111111"] },
   { id: "bauhaus", name: "Bauhaus", colors: ["#f7f2e7", "#d9b52f", "#962f2f"] },
   { id: "artdeco", name: "Art Deco", colors: ["#faf7ed", "#d8c99f", "#73591f"] },
+  { id: "riso", name: "Riso", colors: ["#fdf8ef", "#5fcfc4", "#c42a66"] },
+  { id: "synthwave", name: "Synthwave", colors: ["#1b1030", "#5ce1e6", "#ff6ad5"] },
 ];
 
 function currentTheme() {

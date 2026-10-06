@@ -127,6 +127,26 @@
   --shadow-color: rgba(33,30,24,.18); --thinking-body: #4b445e;
   --radius: 0 8px 0 8px;
 }
+:root[data-theme="riso"] {
+  color-scheme: light;
+  /* Two-drum risograph print: fluorescent pink and teal inks on cream stock. */
+  --bg: #fdf8ef; --bg-alt: #f7eedf; --bg-elev: #f0e2cc; --border: #e1cdb0;
+  --text: #1f1a2e; --muted: #6a6170; --accent: #c42a66; --user: #00756f;
+  --assistant: #c42a66; --thinking: #5b4bb0; --tool: #2f7a3a; --tool-err: #b3261e;
+  --code-bg: #f8f0e2; --focus-ring: rgba(196,42,102,.16);
+  --shadow-color: rgba(31,26,46,.14); --thinking-body: #463c80;
+  --radius: 4px;
+}
+:root[data-theme="synthwave"] {
+  color-scheme: dark;
+  --bg: #1b1030; --bg-alt: #221539; --bg-elev: #2e1d4b; --border: #4a3270;
+  --text: #f1e9ff; --muted: #a99bc7; --accent: #ff6ad5; --user: #5ce1e6;
+  --assistant: #ff7edb; --thinking: #c3a6ff; --tool: #72f1b8; --tool-err: #ff6b7f;
+  --code-bg: #140b25; --focus-ring: rgba(255,106,213,.25);
+  --shadow-color: rgba(0,0,0,.45); --thinking-body: #d5c6f5;
+  --diff-add-text: #8ef0b4; --diff-del-text: #ff8b9b; --on-accent: #1b1030;
+  --radius: 6px;
+}
 
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
@@ -376,10 +396,60 @@ body.standalone.sidebar-collapsed .edge-toggle-left { display: none; }
 :root[data-theme="artdeco"] .session-item { border-radius: 0 8px 0 8px; }
 :root[data-theme="artdeco"] .brand-mark { background: #b79a50; border: 1px solid var(--text); border-radius: 0; }
 
+/* Riso: slightly misregistered pink and teal ink layers behind every control. */
+:root[data-theme="riso"] .brand-name { letter-spacing: .04em; }
+:root[data-theme="riso"] .brand-mark {
+  border-radius: 0; background: var(--accent); box-shadow: 3px 2px 0 rgba(0,169,157,.6);
+}
+:root[data-theme="riso"] .theme-toggle,
+:root[data-theme="riso"] .edge-toggle,
+:root[data-theme="riso"] .filter-chip,
+:root[data-theme="riso"] .dropdown-btn,
+:root[data-theme="riso"] .dd-clear,
+:root[data-theme="riso"] .btn,
+:root[data-theme="riso"] #search {
+  border: 1px solid var(--text); border-radius: 3px;
+  box-shadow: 2px 2px 0 rgba(0,169,157,.5), -1px -1px 0 rgba(255,72,176,.45);
+}
+:root[data-theme="riso"] .theme-menu,
+:root[data-theme="riso"] .dropdown-panel {
+  border: 1px solid var(--text); border-radius: 3px;
+  box-shadow: 4px 4px 0 rgba(0,169,157,.45), -2px -2px 0 rgba(255,72,176,.35);
+}
+:root[data-theme="riso"] .session-item.active { box-shadow: 3px 3px 0 rgba(255,72,176,.4); }
+
+/* Synthwave: neon edges and soft glows over a midnight-purple grid. */
+:root[data-theme="synthwave"] .brand-name { text-shadow: 0 0 8px rgba(255,106,213,.6); }
+:root[data-theme="synthwave"] .brand-mark {
+  border-radius: 2px; background: linear-gradient(180deg, #ffd166, #ff6ad5 60%, #8b5cf6);
+  box-shadow: 0 0 8px rgba(255,106,213,.7);
+}
+:root[data-theme="synthwave"] .theme-toggle,
+:root[data-theme="synthwave"] .edge-toggle,
+:root[data-theme="synthwave"] .filter-chip,
+:root[data-theme="synthwave"] .dropdown-btn,
+:root[data-theme="synthwave"] .dd-clear,
+:root[data-theme="synthwave"] .btn,
+:root[data-theme="synthwave"] #search { border-color: #6b3f9a; }
+:root[data-theme="synthwave"] .theme-toggle:hover,
+:root[data-theme="synthwave"] .dropdown-btn:hover,
+:root[data-theme="synthwave"] .btn:hover,
+:root[data-theme="synthwave"] .filter-chip.on {
+  border-color: var(--accent); box-shadow: 0 0 8px rgba(255,106,213,.45);
+}
+:root[data-theme="synthwave"] #search:focus { border-color: var(--user); box-shadow: 0 0 10px rgba(92,225,230,.4); }
+:root[data-theme="synthwave"] .theme-menu,
+:root[data-theme="synthwave"] .dropdown-panel {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(92,225,230,.25), 0 0 18px rgba(255,106,213,.3);
+}
+:root[data-theme="synthwave"] .session-item.active { box-shadow: inset 3px 0 0 var(--user), 0 0 10px rgba(92,225,230,.18); }
+
 /* These themes change instantly; none of their character relies on motion. */
 :root:is([data-theme="sorbet"], [data-theme="terminal"],
          [data-theme="highlighter"], [data-theme="nineties"], [data-theme="system7"],
-         [data-theme="bauhaus"], [data-theme="artdeco"]) * {
+         [data-theme="bauhaus"], [data-theme="artdeco"],
+         [data-theme="riso"], [data-theme="synthwave"]) * {
   animation: none !important; transition-duration: 0s !important;
 }
 #search {
