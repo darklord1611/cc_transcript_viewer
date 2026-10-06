@@ -9,9 +9,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import quote
 
 import codex_parser as codex
-from tests.fixture_builders import _write_jsonl
+import server
+from tests.fixture_builders import ViewerServerTestCase, _write_jsonl
 
 
 class CodexReasoningSummaryTests(unittest.TestCase):
@@ -274,6 +276,47 @@ class CodexOrchestrationTests(unittest.TestCase):
         self.assertNotIn("abc", masked)
         self.assertIn("y = 1;", masked)
 
+    def test_codex_exec_orchestration_is_structured(self):
+        command_source = (
+            'const r = await tools.exec_command({"cmd":"git status --short",'
+            '"workdir":"/tmp"}); text(r.output);'
+        )
+        command = codex._normalize_tool_input("exec", command_source)
+        self.assertEqual(command["calls"][0]["name"], "exec_command")
+        self.assertEqual(command["calls"][0]["input"]["cmd"], "git status --short")
+        self.assertIn("git status --short", server._event_text({"input": command}))
+
+        patch_source = (
+            'const patch = "*** Begin Patch\\n*** Update File: a\\n@@\\n-x\\n+y\\n*** End Patch";'
+            " text(await tools.apply_patch(patch));"
+        )
+        patch = codex._normalize_tool_input("exec", patch_source)
+        self.assertEqual(patch["calls"][0]["name"], "apply_patch")
+        self.assertIn("*** Update File: a", patch["calls"][0]["input"])
+
+        wrapped = (
+            'Script completed\nWall time 0.1 seconds\nOutput:\n\n'
+            '{"chunk_id":"abc","wall_time_seconds":0.25,"exit_code":0,'
+            '"output":"actual stdout\\n"}'
+        )
+        result = codex._normalize_tool_output(wrapped, name="exec", args=command)
+        self.assertEqual(result["text"], "actual stdout\n")
+        self.assertEqual(result["metadata"]["exit_code"], 0)
+        self.assertEqual(result["metadata"]["chunk_id"], "abc")
+
+        javascript_object = r'''const r = await tools.exec_command({
+          cmd: "find output -type f \\\\( -name '*.json' -o -name \"*.txt\" \\\\) -delete",
+          workdir: "/tmp/project",
+          yield_time_ms: 10000,
+          max_output_tokens: 2000,
+        }); text(r.output);'''
+        parsed = codex._normalize_tool_input("exec", javascript_object)
+        call = parsed["calls"][0]
+        self.assertEqual(call["name"], "exec_command")
+        self.assertEqual(call["input"]["workdir"], "/tmp/project")
+        self.assertEqual(call["input"]["yield_time_ms"], 10000)
+        self.assertIn("-name '*.json'", call["input"]["cmd"])
+
 
 class CodexExecUnwrapTests(unittest.TestCase):
     def test_wrapped_output_is_unwrapped(self):
@@ -397,6 +440,76 @@ class ItemCompletedFormatTests(unittest.TestCase):
         raws = [e for e in data["events"] if e["kind"] == "raw"]
         self.assertEqual([e["record_type"] for e in raws],
                          ["event_msg/brand_new_thing"])
+
+
+class CodexFixtureSessionTests(ViewerServerTestCase):
+    def test_guardian_is_grouped_and_structured(self):
+        summary = codex.session_summary(self.codex_guardian)
+        self.assertTrue(summary["is_subagent"])
+        self.assertEqual(summary["subagent_type"], "guardian")
+        self.assertEqual(summary["parent_file"], str(self.codex_parent.resolve()))
+        self.assertEqual(summary["title"], "Approval reviews")
+
+        data = codex.parse_session(self.codex_guardian)
+        request = next(ev for ev in data["events"] if ev["kind"] == "guardian_request")
+        decision = next(ev for ev in data["events"] if ev["kind"] == "guardian_decision")
+        self.assertEqual(request["request"]["tool"], "exec_command")
+        self.assertEqual(
+            request["request"]["command"][-1],
+            "python3 -m unittest tests.test_security",
+        )
+        self.assertEqual(request["metadata"]["model"], "guardian-test")
+        self.assertEqual(request["metadata"]["duration_ms"], 2000)
+        self.assertEqual(request["metadata"]["usage"]["input_tokens"], 1200)
+        self.assertEqual(decision["outcome"], "allow")
+        self.assertFalse(
+            {"status", "context", "tokens", "raw"}
+            & {event["kind"] for event in data["events"]}
+        )
+
+        sessions = server.list_sessions()
+        parent_index = next(
+            i for i, s in enumerate(sessions) if s["file"] == str(self.codex_parent.resolve())
+        )
+        self.assertEqual(sessions[parent_index + 1]["file"], str(self.codex_guardian.resolve()))
+
+    def test_codex_user_images_prefer_local_and_fallback_inline(self):
+        data = codex.parse_session(self.codex_parent)
+        local = next(ev for ev in data["events"] if ev.get("text") == "look at this")
+        fallback = next(ev for ev in data["events"] if ev.get("text") == "missing image")
+        self.assertEqual(local["images"][0]["kind"], "local")
+        self.assertIn(quote(str(self.codex_image.resolve()), safe=""), local["images"][0]["src"])
+        self.assertEqual(fallback["images"][0]["kind"], "inline")
+        self.assertTrue(fallback["images"][0]["src"].startswith("data:image/png;base64,"))
+
+    def test_codex_turn_metadata_attaches_to_final_answer(self):
+        data = codex.parse_session(self.codex_parent)
+        answer = next(ev for ev in data["events"] if ev.get("text") == "metadata answer")
+        self.assertEqual(answer["turn_metadata"]["model"], "codex-test")
+        self.assertEqual(answer["turn_metadata"]["duration_ms"], 3000)
+        self.assertEqual(answer["turn_metadata"]["usage"]["input_tokens"], 100)
+        self.assertFalse(
+            {"status", "context", "tokens"} & {event["kind"] for event in data["events"]}
+        )
+
+    def test_codex_compaction_is_a_visible_boundary(self):
+        data = codex.parse_session(self.codex_parent)
+        compact = next(
+            ev for ev in data["events"]
+            if ev.get("kind") == "system" and ev.get("subtype") == "compact_boundary"
+        )
+        self.assertEqual(compact["compaction"]["source"], "codex")
+        self.assertEqual(compact["compaction"]["window_number"], 1)
+        self.assertEqual(compact["compaction"]["replacement_items"], 2)
+        self.assertTrue(compact["compaction"]["summary_encrypted"])
+        self.assertEqual(compact["text"], "")
+        self.assertEqual(
+            compact["metadata"]["world_state"]["state"]["environments"]["local"]["shell"],
+            "zsh",
+        )
+        self.assertFalse(
+            any(ev.get("record_type") == "world_state" for ev in data["events"])
+        )
 
 
 if __name__ == "__main__":

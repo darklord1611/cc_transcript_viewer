@@ -48,13 +48,13 @@ EVENTS_FILE = "events.jsonl"
 FILES_DIR = "files"
 RECORD_FILE = "record.json"
 
-# Event types, grouped by what they mean for trust in the live transcript.
-# Tamper events flag a session; info events are recorded but expected; gap
-# events mark periods when capture could not see (part of) a transcript.
-TAMPER_EVENTS = frozenset({"truncated", "rewritten", "replaced", "deleted", "recreated"})
-FLAG_EVENTS = TAMPER_EVENTS | {"unreadable"}
-INFO_EVENTS = frozenset({"moved", "inode_changed", "daemon_started"})
-GAP_EVENTS = frozenset({"unreadable", "access_lost", "access_restored", "capture_gap"})
+# Event types the daemon writes. Changes it flags on the transcript:
+# truncated, rewritten, replaced, deleted, recreated, unreadable. Expected
+# changes: moved, inode_changed, readable_again. Store-wide events, with no
+# transcript key: daemon_started, capture_gap (the daemon was not running),
+# access_lost / access_restored (a whole source folder), and unreadable for a
+# file Mica could never open, so has no capture of.
+STORE_EVENTS_SHOWN = frozenset({"capture_gap", "access_lost", "access_restored", "unreadable"})
 
 # A heartbeat older than this means the daemon is not running.
 HEARTBEAT_STALE_SECONDS = 30
@@ -147,6 +147,12 @@ def read_jsonl(path: Path) -> list:
     except OSError:
         pass
     return out
+
+
+def _flags(entry: dict) -> list:
+    """Every flag the daemon recorded, as recorded."""
+    flags = entry.get("flags")
+    return [str(f) for f in flags] if isinstance(flags, list) else []
 
 
 def _clip(text: str, n: int) -> str:
@@ -306,7 +312,8 @@ class StoreReader:
         self._by_path: dict = {}
         self._realpaths: dict = {}
         self._records: dict = {}
-        self._access_gaps: dict = {}
+        self._events_fp = None
+        self._store_events: list = []
 
     # ----- mica-level state ------------------------------------------------
     def available(self) -> bool:
@@ -323,7 +330,7 @@ class StoreReader:
         last = parse_iso(hb.get("last_poll"))
         age = None if last is None else max(0.0, time.time() - last)
         index = self.index()
-        flagged = sum(1 for key, e in index.items() if self._flags(key, e.get("flags")))
+        flagged = sum(1 for e in index.values() if _flags(e))
         cpu = hb.get("cpu_percent")
         cpu = cpu if isinstance(cpu, (int, float)) and not isinstance(cpu, bool) else None
         return {
@@ -337,7 +344,24 @@ class StoreReader:
             "n_flagged": flagged,
             "cpu_percent": cpu,
             "cpu_warn": cpu is not None and cpu > CPU_WARN_PERCENT,
+            "store_events": self.store_events(),
         }
+
+    def store_events(self) -> list:
+        """Store-wide gaps and failures (not tied to one captured transcript),
+        re-read only when the log changes."""
+        path = self.root / EVENTS_FILE
+        try:
+            st = path.stat()
+            fp = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            fp = None
+        if fp != self._events_fp:
+            events = read_jsonl(path) if fp else []
+            self._store_events = [e for e in events if isinstance(e, dict) and not e.get("key")
+                                  and e.get("type") in STORE_EVENTS_SHOWN]
+            self._events_fp = fp
+        return self._store_events
 
     def index(self) -> dict:
         """key -> summary, reloaded only when index.json changes."""
@@ -401,30 +425,6 @@ class StoreReader:
             return []
         return read_jsonl(self.files_dir / key / EVENTS_FILE)
 
-    def _flags(self, key: str, recorded_flags) -> list:
-        if not valid_key(key):
-            return []
-        flags = [f for f in recorded_flags or [] if f in FLAG_EVENTS]
-        if "unreadable" in flags:
-            return flags
-        cached = self._access_gaps.get(key)
-        if cached and cached[1]:
-            return flags + ["unreadable"]
-        # Older installed daemons log access loss without adding a flag. Keep
-        # that history visible too; only re-read the log when it changes.
-        path = self.files_dir / key / EVENTS_FILE
-        try:
-            st = path.stat()
-            fp = (st.st_mtime_ns, st.st_size)
-        except OSError:
-            fp = None
-        if cached is None or cached[0] != fp:
-            lost = any(ev.get("type") == "unreadable" for ev in self.events(key)) if fp else False
-            self._access_gaps[key] = (fp, lost)
-        if self._access_gaps[key][1]:
-            flags.append("unreadable")
-        return flags
-
     def generation_path(self, key: str, gen: dict) -> Path | None:
         mirror = gen.get("mirror") if isinstance(gen, dict) else None
         if not valid_key(key) or not isinstance(mirror, str):
@@ -457,15 +457,11 @@ class StoreReader:
     # ----- the viewer's questions ------------------------------------------
     def badge(self, key: str) -> dict:
         """Compact per-session mica state for the sidebar, from the index
-        and cached access-loss history."""
+        only (no file reads)."""
         entry = self.index().get(key) or {}
-        flags = self._flags(key, entry.get("flags"))
+        flags = _flags(entry)
         state = entry.get("status") or "active"
         return {"key": key, "state": state, "flags": flags, "generations": entry.get("gens", 1)}
-
-    def deleted_entries(self) -> list:
-        """(key, entry) for captured files whose live transcript is gone."""
-        return [(k, e) for k, e in self.index().items() if e.get("status") == "deleted"]
 
     def best_generation(self, record: dict) -> dict | None:
         """The generation to show for a file with no live copy: the largest
@@ -523,7 +519,7 @@ class StoreReader:
             "path": record.get("path"),
             "first_seen": record.get("first_seen"),
             "preexisting": bool(record.get("preexisting")),
-            "flags": self._flags(key, record.get("flags")),
+            "flags": _flags(record),
             "recreated_from": record.get("recreated_from"),
             "generations": [],
             "events": self.events(key),

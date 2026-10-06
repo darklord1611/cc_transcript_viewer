@@ -99,19 +99,18 @@ def cmd_status(args) -> int:
 
 def cmd_flagged(args) -> int:
     reader = _reader(args)
-    flagged = []
-    for key, entry in sorted(reader.index().items()):
-        flags = reader.badge(key)["flags"]
-        if flags:
-            flagged.append((key, dict(entry, flags=flags)))
+    flagged = [(k, e) for k, e in sorted(reader.index().items()) if e.get("flags")]
     if not flagged:
         print("no flagged transcripts")
-        return 0
     for key, entry in flagged:
         print(f"{key}  [{', '.join(entry['flags'])}]  {entry.get('path')}")
         for event in reader.events(key):
-            if event.get("type") in v.FLAG_EVENTS:
-                print(f"    {event.get('t')}  {event.get('type')}  {json.dumps(event.get('detail') or {})}")
+            print(f"    {event.get('t')}  {event.get('type')}  {json.dumps(event.get('detail') or {})}")
+    store_events = reader.store_events()
+    if store_events:
+        print("\nstore-wide gaps and failures:")
+        for event in store_events:
+            print(f"    {event.get('t')}  {event.get('type')}  {json.dumps(event.get('detail') or {})}")
     return 0
 
 
@@ -140,7 +139,7 @@ def main(argv=None) -> int:
 
     for name, func, text in (
         ("status", cmd_status, "is the daemon running, and what does it cover"),
-        ("flagged", cmd_flagged, "list transcripts with tamper events"),
+        ("flagged", cmd_flagged, "list flagged transcripts and store-wide gaps"),
         ("verify", cmd_verify, "recheck Mica's own hash chains"),
     ):
         p = sub.add_parser(name, help=text)

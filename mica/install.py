@@ -306,16 +306,25 @@ def add_install_args(ap) -> None:
     ap.add_argument("--store", default=str(v.DEFAULT_STORE_DIR), help="store directory")
     ap.add_argument("--python", default=DEFAULT_PYTHON, help="root-owned Python 3.9+ for the daemon")
     ap.add_argument("--poll", type=float, default=capture.DEFAULT_POLL_SECONDS, help="seconds between polls")
+    ap.add_argument("--reinstall", action="store_true",
+                    help="replace an existing install: stop the daemon, then install again, keeping the captures")
+    ap.add_argument("--reset", action="store_true",
+                    help="with --reinstall, also delete every captured transcript and start the store from scratch")
     ap.add_argument("--yes", action="store_true", help="don't ask for confirmation")
     ap.add_argument("--dry-run", action="store_true", help="print the plan without changing anything")
 
 
-def build_install_plan(user, store_dir: Path, python_exe: str, poll: float, service_exists: bool, free_id=None) -> tuple:
+def build_install_plan(user, store_dir: Path, python_exe: str, poll: float, service_exists: bool,
+                       free_id=None, reset: bool = False) -> tuple:
     """(steps, sources, notes) for installing for ``user`` (a pwd entry)."""
     home = Path(os.path.realpath(user.pw_dir))
     sources = capture.default_sources(home)
     notes = []
-    steps = []
+    # Stop a running copy before its access is cleared and re-granted below;
+    # otherwise it sees every transcript become unreadable for a moment.
+    steps = [Step("stop any running copy", ["launchctl", "bootout", f"system/{LABEL}"], check=False)]
+    if reset:
+        steps.append(Step(f"delete {store_dir} and every capture in it", ["rm", "-rf", str(store_dir)]))
 
     if not service_exists:
         ident = str(free_id() if callable(free_id) else free_id)
@@ -380,7 +389,6 @@ def build_install_plan(user, store_dir: Path, python_exe: str, poll: float, serv
 
     steps += [
         Step(f"write {PLIST_PATH}", func=lambda: _write_plist(python_exe, store_dir)),
-        Step("stop any running copy", ["launchctl", "bootout", f"system/{LABEL}"], check=False),
         Step("start at boot", ["launchctl", "enable", f"system/{LABEL}"]),
         Step("start now", ["launchctl", "bootstrap", "system", str(PLIST_PATH)]),
     ]
@@ -455,6 +463,12 @@ def _confirm(prompt: str) -> bool:
 
 def cmd_install(args) -> int:
     _require_macos_root(args.dry_run)
+    if args.reset and not args.reinstall:
+        raise SystemExit("--reset only works with --reinstall")
+    installed = PLIST_PATH.exists() or LIBEXEC_DIR.exists()
+    if installed and not args.reinstall:
+        raise SystemExit("Mica is already installed. Use --reinstall to replace it (keeps the captures), "
+                         "or --reinstall --reset to also delete every capture.")
     user = _target_user(args.user)
     service_exists = _service_user_exists(user)
     store_dir = Path(args.store)
@@ -469,7 +483,7 @@ def cmd_install(args) -> int:
         )
     python_exe, _prefix = resolve_interpreter(args.python)
     steps, sources, notes = build_install_plan(
-        user, store_dir, python_exe, args.poll, service_exists, free_id=_free_id,
+        user, store_dir, python_exe, args.poll, service_exists, free_id=_free_id, reset=args.reset,
     )
     print(f"Mica install for {user.pw_name}")
     print(f"  daemon user:   {SERVICE_USER}")
@@ -484,7 +498,8 @@ def cmd_install(args) -> int:
         print("Plan (dry run, nothing changed):")
         _run_plan(steps, dry_run=True)
         return 0
-    if not args.yes and not _confirm("Proceed?"):
+    prompt = f"Proceed? This DELETES every capture in {store_dir}." if args.reset else "Proceed?"
+    if not args.yes and not _confirm(prompt):
         print("aborted")
         return 1
     _run_plan(steps, dry_run=False)

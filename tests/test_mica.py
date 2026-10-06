@@ -343,7 +343,6 @@ class CaptureScenarios(CaptureTestCase):
         entry = self.reader.index()[key]
         self.assertEqual((entry["status"], entry["flags"]), ("deleted", ["deleted"]))
         self.assertEqual(self.reader.compare(key, path)["state"], "deleted")
-        self.assertEqual([k for k, _ in self.reader.deleted_entries()], [key])
         gen = self.reader.best_generation(self.reader.record(key))
         self.assertTrue(self.reader.generation_path(key, gen).is_file())
 
@@ -481,6 +480,8 @@ class CaptureScenarios(CaptureTestCase):
         self.tick()
         global_events = [e["type"] for e in v.read_jsonl(self.store_dir / v.EVENTS_FILE)]
         self.assertIn("access_restored", global_events)
+        # The gap has a recorded start and end on the transcript itself.
+        self.assertEqual([e["type"] for e in self.reader.events(key)], ["unreadable", "readable_again"])
         self.assertEqual(self.reader.compare(key, path)["state"], "verified")
         self.assertEqual(self.reader.compare(key, path)["flags"], ["unreadable"])
         self.capturer = self._new_capturer()
@@ -504,21 +505,7 @@ class CaptureScenarios(CaptureTestCase):
         result = self.reader.compare(key, path)
         self.assertEqual(result["state"], "verified")
         self.assertEqual(result["flags"], ["unreadable"])
-
-    def test_legacy_access_loss_events_are_visible_and_cached(self):
-        path = self.session()
-        self.capturer.start()
-        key = self.key(path)
-        self.assertEqual(self.reader.badge(key)["flags"], [])
-        # Existing installations record this event without updating flags.
-        self.capturer._event(key, "unreadable", {"error": "permission denied"})
-        reader = self.reader
-        self.assertEqual(reader.record(key)["flags"], [])
-        self.assertEqual(reader.badge(key)["flags"], ["unreadable"])
-        with mock.patch.object(reader, "events", side_effect=AssertionError("unchanged logs must stay cached")):
-            self.assertEqual(reader.badge(key)["flags"], ["unreadable"])
-            self.assertEqual(reader.status()["n_flagged"], 1)
-        self.assertEqual(reader.compare(key, path)["flags"], ["unreadable"])
+        self.assertEqual([e["type"] for e in result["events"]], ["unreadable", "readable_again"])
 
     def test_symlinks_are_not_followed(self):
         outside = self.tmp / "outside.jsonl"
@@ -593,6 +580,24 @@ class CaptureScenarios(CaptureTestCase):
         with mock.patch.object(v.time, "time", return_value=self.now + 3600):
             self.assertFalse(self.reader.status()["running"])
 
+    def test_reader_reports_what_the_daemon_recorded(self):
+        path = self.session()
+        self.capturer.start()
+        key = self.key(path)
+        # A flag this reader has no label for is still reported, unchanged.
+        self.capturer._flag(key, "some_future_flag", {})
+        self.capturer._write_index()
+        self.assertEqual(self.reader.badge(key)["flags"], ["some_future_flag"])
+        self.assertEqual(self.reader.status()["n_flagged"], 1)
+        # A restart after downtime records a store-wide gap, which the reader
+        # passes on alongside the status.
+        self.now += 3600
+        self.capturer = self._new_capturer()
+        self.capturer.start()
+        gaps = self.reader.status()["store_events"]
+        self.assertEqual([e["type"] for e in gaps], ["capture_gap"])
+        self.assertEqual(set(gaps[0]["detail"]), {"from", "to"})
+
 
 class ViewerIntegration(CaptureTestCase):
     """The viewer reads the store: badges, mica-copy rows, comparison API."""
@@ -655,12 +660,13 @@ class ViewerIntegration(CaptureTestCase):
         self.assertFalse(data["mica_copy"]["live"])
         self.assertTrue(any(ev.get("kind") == "user" for ev in data["events"]))
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores permissions")
     def test_access_lost_session_remains_visible_when_live_listing_loses_it(self):
-        key = self.reader.key_for_path(str(self.live))
-        self.capturer._event(key, "unreadable", {"error": "permission denied"})
-        sessions = []
-        server._apply_mica(sessions)
-        copy = next(s for s in sessions if s["title"] == "live prompt")
+        os.chmod(self.live, 0)
+        self.tick()
+        status, body = self.get_json("/api/sessions")
+        self.assertEqual(status, 200)
+        copy = next(s for s in body["sessions"] if s["title"] == "live prompt")
         self.assertTrue(copy["mica"]["copy"])
         self.assertEqual(copy["mica"]["state"], "active")
         self.assertEqual(copy["mica"]["flags"], ["unreadable"])
@@ -730,6 +736,30 @@ class ViewerIntegration(CaptureTestCase):
         self.get_json("/api/search?q=prompt")
         self.assertEqual(self._snapshot(), before)
 
+    def test_every_capture_is_listed_even_when_the_live_list_misses_it(self):
+        n_captured = len(self.reader.index())
+        with mock.patch.object(claude, "list_sessions", return_value=[]):
+            _status, body = self.get_json("/api/sessions")
+        copies = [s for s in body["sessions"] if s.get("mica", {}).get("copy")]
+        self.assertEqual(len(copies), n_captured)
+        live = next(s for s in copies if s["title"] == "live prompt")
+        self.assertEqual((live["mica"]["state"], live["mica"]["flags"]), ("active", []))
+        # A capture that can't be summarized is still listed, with the reason.
+        with mock.patch.object(claude, "list_sessions", return_value=[]), \
+                mock.patch.object(claude, "session_summary", side_effect=ValueError("bad capture")):
+            _status, body = self.get_json("/api/sessions")
+        copies = [s for s in body["sessions"] if s.get("mica", {}).get("copy")]
+        self.assertEqual(len(copies), n_captured)
+        self.assertTrue(all("bad capture" in s["mica"]["error"] for s in copies))
+
+    def test_store_read_failures_are_reported(self):
+        with mock.patch.object(server.MICA, "badge", side_effect=OSError("store vanished")):
+            status, body = self.get_json("/api/sessions")
+        self.assertEqual(status, 200)
+        self.assertIn("store vanished", body["mica"]["error"])
+        _status, body = self.get_json("/api/sessions")
+        self.assertNotIn("error", body["mica"])
+
     def test_disabled_mica_changes_nothing(self):
         server.configure_mica(self.store_dir, enabled=False)
         _s, body = self.get_json("/api/sessions")
@@ -781,6 +811,10 @@ class InstallerPlan(unittest.TestCase):
         (self.home / ".codex" / "sessions").rmdir()
         (self.home / ".codex").rmdir()
         steps, sources, notes = self._plan(service_exists=True)
+        # A reinstall stops the old daemon before re-granting access, so it
+        # never sees transcripts become unreadable mid-install.
+        self.assertEqual(steps[0].argv, ["launchctl", "bootout", "system/" + install.LABEL])
+        self.assertEqual(sum(s.argv[:2] == ["launchctl", "bootout"] for s in steps if s.argv), 1)
         self.assertFalse(any(s.argv and s.argv[0] == "dscl" for s in steps))
         self.assertEqual([s.name for s in sources], ["claude"])
         self.assertEqual(len(notes), 2)
@@ -790,6 +824,14 @@ class InstallerPlan(unittest.TestCase):
         self.assertEqual(plist["UserName"], "_mica")
         self.assertEqual(plist["ProgramArguments"][:2], ["/usr/bin/python3", "-I"])
         self.assertTrue(plist["KeepAlive"] and plist["RunAtLoad"])
+
+    def test_reset_deletes_the_store_after_stopping_the_daemon(self):
+        steps, _sources, _notes = self._plan(service_exists=True)
+        self.assertNotIn(["rm", "-rf", "/Library/Mica"], [s.argv for s in steps])
+        steps, _sources, _notes = install.build_install_plan(
+            self.user, Path("/Library/Mica"), "/usr/bin/python3", 1.0, True, reset=True)
+        self.assertEqual([s.argv for s in steps[:2]],
+                         [["launchctl", "bootout", "system/" + install.LABEL], ["rm", "-rf", "/Library/Mica"]])
 
     def test_uninstall_plan_keeps_the_mica_by_default(self):
         steps = install.build_uninstall_plan(self.user, Path("/Library/Mica"), delete_store=False)

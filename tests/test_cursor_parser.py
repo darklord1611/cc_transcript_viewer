@@ -12,9 +12,10 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from urllib.parse import quote
 
 import cursor_parser as cursor
-from tests.fixture_builders import _write_cli_store
+from tests.fixture_builders import ViewerServerTestCase, _write_cli_store
 
 
 class CursorDiffTests(unittest.TestCase):
@@ -747,6 +748,121 @@ class CursorRawFallbackTests(unittest.TestCase):
         self.assertEqual(kinds.count("raw"), 1)
         self.assertEqual(raws[0]["record_type"], "bubble/7")
         self.assertTrue(raws[0]["payload"]["mystery"])
+
+
+class CursorCliSessionTests(ViewerServerTestCase):
+    def test_cursor_cli_session_lists_and_parses(self):
+        """CLI agent-transcripts under ~/.cursor/projects are visible and readable."""
+        _, _, body = self.get("/api/sessions")
+        sessions = json.loads(body)["sessions"]
+        match = next(s for s in sessions if s["file"] == str(self.cli_fixture.resolve()))
+        self.assertEqual(match["agent"], "cursor")
+        self.assertEqual(match["cursor_source"], "cli-jsonl")
+        self.assertEqual(match["title"], "hello from cursor cli")
+        self.assertEqual(match["cwd"], "/Users/test/demo")
+        self.assertGreaterEqual(match["n_tool"], 2)
+
+        status, _, body = self.get(
+            "/api/session?file=" + quote(str(self.cli_fixture.resolve())))
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["agent"], "cursor")
+        self.assertEqual(data["cursor_source"], "cli-jsonl")
+        kinds = [ev["kind"] for ev in data["events"]]
+        self.assertIn("user", kinds)
+        self.assertIn("assistant", kinds)
+        tools = [
+            b for ev in data["events"] for b in ev.get("blocks") or []
+            if b.get("type") == "tool_use"
+        ]
+        names = {t["name"] for t in tools}
+        self.assertIn("Shell", names)
+        self.assertIn("Edit", names)  # StrReplace normalized
+        self.assertTrue(all(t.get("result", {}).get("missing") for t in tools))
+
+    def test_cursor_cli_subagent_link_survives_preferred_db_record(self):
+        """A rich duplicate keeps hierarchy learned from its JSONL path."""
+        parent_id = self.cli_fixture.stem
+        sub_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        sub_dir = self.cli_fixture.parent / "subagents"
+        sub_dir.mkdir()
+        sub_path = sub_dir / f"{sub_id}.jsonl"
+        sub_path.write_text(json.dumps({
+            "role": "user",
+            "message": {"content": "inspect the child task"},
+        }) + "\n")
+
+        original_list_db = cursor._list_db_sessions
+        try:
+            cursor._list_db_sessions = lambda: [
+                {"id": parent_id, "file": "cursordb:" + parent_id,
+                 "title": "Rich parent", "mtime": 10},
+                {"id": sub_id, "file": "cursordb:" + sub_id,
+                 "title": "Rich child", "mtime": 9},
+            ]
+            sessions = cursor.list_sessions()
+        finally:
+            cursor._list_db_sessions = original_list_db
+            sub_path.unlink()
+            sub_dir.rmdir()
+        child = next(s for s in sessions if s["id"] == sub_id)
+        self.assertEqual(child["file"], "cursordb:" + sub_id)
+        self.assertTrue(child["is_subagent"])
+        self.assertEqual(child["parent_id"], parent_id)
+        self.assertEqual(child["parent_file"], "cursordb:" + parent_id)
+
+    def test_cursor_cli_store_subagent_info_is_grouped(self):
+        """Newer top-level chat stores use subagentInfo instead of a subdirectory."""
+        parent_id = self.cli_fixture.stem
+        sub_id = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+        _write_cli_store(
+            self.cursor_chats,
+            session_id=sub_id,
+            title="New Agent",
+            user_text=(
+                "<system_reminder>You are running as a subagent.</system_reminder>\n"
+                "You are a candidate runner.\n\n## Task\nInspect the dependency setup."
+            ),
+            meta_extra={"subagentInfo": {
+                "parentAgentId": parent_id,
+                "rootParentAgentId": parent_id,
+                "typeName": "best-of-n-runner",
+            }},
+        )
+
+        sessions = cursor.list_sessions()
+        child = next(s for s in sessions if s["id"] == sub_id)
+        self.assertTrue(child["is_subagent"])
+        self.assertEqual(child["subagent_type"], "best-of-n-runner")
+        self.assertEqual(child["parent_id"], parent_id)
+        self.assertEqual(child["parent_file"], str(self.cli_fixture.resolve()))
+        self.assertEqual(child["title"], "[best-of-n-runner] Inspect the dependency setup.")
+
+    def test_cursor_cli_store_db_includes_tool_results(self):
+        """CLI store.db sessions are preferred and include tool outputs."""
+        store_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        file_id = cursor.CLI_SESSION_SCHEME + store_id
+        _, _, body = self.get("/api/sessions")
+        sessions = json.loads(body)["sessions"]
+        match = next(s for s in sessions if s["file"] == file_id)
+        self.assertEqual(match["agent"], "cursor")
+        self.assertEqual(match["cursor_source"], "cli")
+        self.assertEqual(match["title"], "Store db session")
+        self.assertEqual(match["cwd"], "/Users/test/demo")
+        self.assertEqual(match["model"], "grok-test")
+
+        status, _, body = self.get("/api/session?file=" + quote(file_id))
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["cursor_source"], "cli")
+        tools = [
+            b for ev in data["events"] for b in ev.get("blocks") or []
+            if b.get("type") == "tool_use"
+        ]
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0]["name"], "Shell")
+        self.assertIn("hi", tools[0]["result"]["text"])
+        self.assertFalse(tools[0]["result"].get("missing"))
 
 
 if __name__ == "__main__":

@@ -94,59 +94,86 @@ class StandaloneBrowserJourneyTests(unittest.TestCase):
         self.assertNotIn("TOOL_OUTPUT_SHOULD_NOT_COPY", probe_data["copy"])
 
 
-    def test_setup_dismissal_and_persistent_access_warning(self):
+    def test_live_viewer_settings_banner_and_access_gap(self):
+        """The live page against a scripted API: the settings banner is
+        dismissed and comes back via polls, and an access-lost transcript is
+        tagged in the sidebar and explains its gap when opened."""
+        file = str(FIXTURE)
+        summary = dict(codex.session_summary(FIXTURE), file=file,
+                       mica={"key": "k", "state": "active", "flags": ["unreadable"], "generations": 1})
+        session = dict(codex.parse_session(FIXTURE), file=file)
+        compare = {"state": "verified", "flags": ["unreadable"], "path": file, "generations": [],
+                   "events": [{"type": "unreadable", "t": "2026-01-01T10:00:00Z"},
+                              {"type": "readable_again", "t": "2026-01-01T10:05:00Z"}]}
+        issue = {"agent": "Claude Code", "setting": "cleanupPeriodDays", "recommended": 10000,
+                 "path": "/fixture/settings.json", "reason": "Keep transcripts."}
+        other = dict(issue, setting="showThinkingSummaries", recommended=True)
+
         rendered = (export_html.STATIC_DIR / "index.html").read_text()
         rendered = re.sub(r'<script\b[^>]*\bsrc="https://[^"]+"[^>]*></script>', "", rendered)
         rendered = re.sub(r'<link\b[^>]*\bhref="https://[^"]+"[^>]*>', "", rendered)
         rendered = rendered.replace(export_html.STYLE_LINK,
                                     "<style>" + (export_html.STATIC_DIR / "style.css").read_text() + "</style>")
+        api = {"session": session, "compare": compare, "summary": summary}
         mocked_api = """<script>
           localStorage.clear();
-          window.__setup = {issues: [{agent: 'Claude Code', setting: 'cleanupPeriodDays',
-            recommended: 10000, path: '/fixture/settings.json', reason: 'Keep transcripts.'}]};
-          window.fetch = async () => ({json: async () => ({sessions: [], setup: window.__setup,
-            mica: {enabled: true, running: true, n_files: 1,
-              sources: {claude: {ok: false, error: 'permission denied'}}}})});
-        </script>"""
+          const API = %s;
+          window.__setup = {issues: [%s]};
+          const reply = (body) => ({json: async () => body});
+          window.fetch = async (url) => {
+            if (url.startsWith('/api/sessions')) return reply({sessions: [API.summary], setup: window.__setup,
+              mica: {enabled: true, running: true, n_files: 1, n_flagged: 1,
+                     sources: {claude: {ok: false, error: 'permission denied'}}}});
+            if (url.startsWith('/api/session?')) return reply(API.session);
+            if (url.startsWith('/api/mica-compare')) return reply(API.compare);
+            return reply({});
+          };
+        </script>""" % (json.dumps(api), json.dumps(issue))
         rendered = rendered.replace(export_html.APP_SCRIPT, mocked_api + "<script>\n" +
                                     (export_html.STATIC_DIR / "app.js").read_text() + "\n</script>")
         probe = """<script>
-          setTimeout(() => {
-            const banner = document.querySelector('#setup-banner');
-            const result = {initialVisible: !banner.hidden,
-              layoutFits: document.querySelector('#app').getBoundingClientRect().bottom <= innerHeight + 1};
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+          const poll = () => sleep(1100);
+          const $q = (s) => document.querySelector(s);
+          (async () => {
+            const result = {};
+            const banner = $q('#setup-banner');
+            await sleep(100);
+            result.initialVisible = !banner.hidden;
+            result.layoutFits = $q('#app').getBoundingClientRect().bottom <= innerHeight + 1;
             banner.querySelector('button').click();
             result.dismissed = banner.hidden;
-            result.dismissalSaved = !!localStorage.getItem(SETUP_DISMISS_KEY);
-            renderSetupBanner(window.__setup);
+            await poll();
             result.staysDismissed = banner.hidden;
-            const next = {issues: [...window.__setup.issues, {agent: 'Claude Code',
-              setting: 'showThinkingSummaries', recommended: true, path: '/fixture/settings.json', reason: 'Save thinking.'}]};
-            renderSetupBanner(next);
+            window.__setup = {issues: [...window.__setup.issues, %s]};
+            await poll();
             result.newIssueVisible = !banner.hidden;
             banner.querySelector('button').click();
-            renderSetupBanner({issues: []});
-            renderSetupBanner(next);
+            window.__setup = {issues: []};
+            await poll();
+            window.__setup = {issues: [%s]};
+            await poll();
             result.regressionVisible = !banner.hidden;
-            result.sourceFailureVisible = document.querySelector('#mica-status').textContent.includes('capture incomplete');
-            const box = el('div'), lock = el('span');
-            fillMicaBanner(box, lock, {state: 'verified', flags: ['unreadable'],
-              events: [{type: 'unreadable', t: '2026-01-01T00:00:00Z'}]}, {});
-            result.gapWarningVisible = !box.hidden && box.textContent.includes('lost read access');
-            result.cleanLockHidden = lock.hidden;
-            result.sessionFlagged = isMicaFlagged({mica: {state: 'active', flags: ['unreadable']}});
+            result.sourceFailureVisible = $q('#mica-status').textContent.includes('capture incomplete');
+            const row = $q('.session-item');
+            result.rowTagged = row.textContent.includes('access lost');
+            row.click();
+            await sleep(300);
+            const micaBanner = $q('#transcript .mica-banner');
+            result.gapExplained = !micaBanner.hidden && micaBanner.textContent.includes('lost read access') &&
+              micaBanner.textContent.includes(fmtTime('2026-01-01T10:05:00Z'));
+            result.cleanLockHidden = $q('#transcript .mica-lock').hidden;
             document.body.setAttribute('data-test-probe', encodeURIComponent(JSON.stringify(result)));
-          }, 0);
-        </script>"""
+          })();
+        </script>""" % (json.dumps(other), json.dumps(issue))
         rendered = rendered.replace("</body>", probe + "\n</body>", 1)
-        result = self.probe_page(rendered)
+        result = self.probe_page(rendered, budget_ms=8000)
         self.assertEqual(result, dict.fromkeys((
-            "initialVisible", "layoutFits", "dismissed", "dismissalSaved", "staysDismissed",
-            "newIssueVisible", "regressionVisible", "sourceFailureVisible", "gapWarningVisible",
-            "cleanLockHidden", "sessionFlagged",
+            "initialVisible", "layoutFits", "dismissed", "staysDismissed", "newIssueVisible",
+            "regressionVisible", "sourceFailureVisible", "rowTagged", "gapExplained", "cleanLockHidden",
         ), True))
 
-    def probe_page(self, rendered):
+    def probe_page(self, rendered, budget_ms=1000):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             page = tmp / "transcript.html"
@@ -169,7 +196,7 @@ class StandaloneBrowserJourneyTests(unittest.TestCase):
                         "--metrics-recording-only",
                         "--no-first-run",
                         "--no-default-browser-check",
-                        "--virtual-time-budget=1000",
+                        "--virtual-time-budget=%d" % budget_ms,
                         "--user-data-dir=" + str(tmp / "chrome-profile"),
                         "--dump-dom",
                         page.as_uri(),
@@ -179,7 +206,7 @@ class StandaloneBrowserJourneyTests(unittest.TestCase):
                     text=True,
                 )
                 try:
-                    deadline = time.monotonic() + 10
+                    deadline = time.monotonic() + 10 + budget_ms / 1000
                     rendered_dom = ""
                     while time.monotonic() < deadline:
                         stdout.seek(0)

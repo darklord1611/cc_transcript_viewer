@@ -2286,6 +2286,16 @@ const MICA_FLAG_LABELS = {
   recreated: "recreated after deletion",
   unreadable: "access lost",
 };
+// Other events Mica records, shown in each transcript's history.
+const MICA_EVENT_LABELS = {
+  ...MICA_FLAG_LABELS,
+  moved: "moved",
+  inode_changed: "rewritten in place with the same content",
+  readable_again: "access restored",
+  capture_gap: "Mica was not running",
+  access_lost: "lost access to a transcript folder",
+  access_restored: "access to the folder restored",
+};
 
 function isMicaFlagged(s) {
   const vt = s.mica;
@@ -2297,6 +2307,10 @@ function micaTag(s) {
   if (!vt) return null;
   if (vt.copy && vt.state === "deleted") {
     return el("span", { class: "mica-tag mica-bad", title: "The live transcript was deleted; shown from Mica's capture" }, "deleted");
+  }
+  if (vt.error) return el("span", { class: "mica-tag mica-bad", title: vt.error }, "⚠ capture unreadable");
+  if (vt.copy && !vt.flags.length) {
+    return el("span", { class: "mica-tag mica-info", title: "No live session matches this capture; shown from Mica's copy" }, "Mica copy");
   }
   if (!vt.flags.length) return null;
   const labels = vt.flags.map((f) => MICA_FLAG_LABELS[f] || f);
@@ -2328,9 +2342,12 @@ function renderMicaStatus() {
   const failures = Object.entries(v.sources || {}).filter(([, src]) => src.ok === false);
   const incomplete = v.running && failures.length > 0;
   const key = [v.running, v.n_files, flagged, FLAGGED_ONLY, busy && v.cpu_percent,
-    JSON.stringify(failures)].join("|");
+    JSON.stringify(failures), v.error, (v.store_events || []).length].join("|");
   const age = v.heartbeat_age == null ? null : Math.round(v.heartbeat_age);
-  box.title = incomplete
+  const storeEvents = v.store_events || [];
+  box.title = v.error
+    ? "Mica: " + v.error
+    : incomplete
     ? "Mica cannot capture: " + failures.map(([name, src]) => `${name}: ${src.error}`).join("; ")
     : busy
     ? `Mica is using ${v.cpu_percent}% of one CPU core (it normally uses well under 1%). ` +
@@ -2342,13 +2359,18 @@ function renderMicaStatus() {
   if (key === MICA_STATUS_KEY) return;
   MICA_STATUS_KEY = key;
   box.hidden = false;
-  box.className = "mica-status" + (!v.running || incomplete ? " mica-down" : busy ? " mica-busy" : "");
+  box.className = "mica-status" + (!v.running || incomplete || v.error ? " mica-down" : busy ? " mica-busy" : "");
   // replaceChildren (unlike el) would render a null child as the text "null".
   box.replaceChildren(...[
     el("span", { class: "mica-dot", "aria-hidden": "true" }),
-    el("span", {}, incomplete ? "⚠ Mica capture incomplete" : v.running ? "Mica capturing" : "Mica not running"),
+    el("span", {}, v.error ? "⚠ Mica store error" : incomplete ? "⚠ Mica capture incomplete"
+      : v.running ? "Mica capturing" : "Mica not running"),
     busy ? el("span", { class: "mica-cpu" }, `⚠ ${v.cpu_percent}% CPU`) : null,
     el("span", { class: "mica-count" }, `${v.n_files} captured`),
+    storeEvents.length
+      ? el("span", { class: "mica-count", title: "Recorded by Mica, not tied to one transcript:\n" +
+          storeEvents.map(describeMicaEvent).join("\n") }, `${storeEvents.length} gap${storeEvents.length === 1 ? "" : "s"}`)
+      : null,
     flagged
       ? el("button", {
           class: "mica-flag-btn" + (FLAGGED_ONLY ? " on" : ""),
@@ -2412,8 +2434,12 @@ function micaOpenLink(file, label, title) {
 
 function describeMicaEvent(ev) {
   const d = ev.detail || {};
-  const label = MICA_FLAG_LABELS[ev.type] || ev.type;
+  const label = MICA_EVENT_LABELS[ev.type] || ev.type;
   let extra = "";
+  if (d.from && d.to) extra = ` (${fmtTime(d.from)} – ${fmtTime(d.to)})`;
+  if (d.source) extra += ` (${d.source})`;
+  if (d.path && !ev.key) extra += ` — ${shortPath(d.path)}, never captured`;
+  if (d.error) extra += `: ${d.error}`;
   if (d.captured_size != null && d.live_size != null) {
     extra = ` (${fmtBytes(d.captured_size)} captured → ${fmtBytes(d.live_size)} on disk)`;
   } else if (d.captured_size != null) {
@@ -2451,8 +2477,10 @@ function fillMicaBanner(box, lock, r, data) {
   const flags = r.flags || [];
   const gens = r.generations || [];
 
-  // Nothing to report: just the lock, with the details on hover.
-  const matches = (r.state === "verified" || r.state === "ahead") && !flags.length && !copy;
+  // Nothing to report: just the lock, with the details on hover. Any event
+  // in the transcript's log, even an expected one, gets the full banner.
+  const matches = (r.state === "verified" || r.state === "ahead") && !flags.length && !copy &&
+    !(r.events || []).length;
   lock.hidden = !matches;
   if (matches) {
     const label = "Matches Mica's capture" +
@@ -2503,8 +2531,15 @@ function fillMicaBanner(box, lock, r, data) {
   }
 
   if (flags.includes("unreadable")) {
-    kids.push(line("⚠ Mica lost read access to this transcript. Activity during that gap may not have been captured; " +
-      "this warning remains after access is restored."));
+    // Pair each loss of access with the next recovery to show the gaps.
+    const gaps = [];
+    for (const ev of r.events || []) {
+      if (ev.type === "unreadable") gaps.push({ from: ev.t, to: null });
+      else if (ev.type === "readable_again" && gaps.length && !gaps[gaps.length - 1].to) gaps[gaps.length - 1].to = ev.t;
+    }
+    const spans = gaps.map((g) => fmtTime(g.from) + " – " + (g.to ? fmtTime(g.to) : "now"));
+    kids.push(line("⚠ Mica lost read access to this transcript" + (spans.length ? " (" + spans.join("; ") + ")" : "") +
+      ". Content written and removed during that time would not have been captured."));
   }
 
   if (copy) {
@@ -2523,10 +2558,9 @@ function fillMicaBanner(box, lock, r, data) {
       micaOpenLink(r.recreated_from_file, "Open the content captured before the deletion")));
   }
 
-  const tamper = (r.events || []).filter((ev) => MICA_FLAG_LABELS[ev.type]);
-  if (tamper.length) {
-    kids.push(el("div", { class: "mica-sub" }, "Recorded changes:"),
-      el("ul", { class: "mica-list" }, ...tamper.map((ev) => el("li", {}, describeMicaEvent(ev)))));
+  if ((r.events || []).length) {
+    kids.push(el("div", { class: "mica-sub" }, "Everything Mica recorded for this transcript:"),
+      el("ul", { class: "mica-list" }, ...r.events.map((ev) => el("li", {}, describeMicaEvent(ev)))));
   }
   if (gens.length > 1 || copy) {
     kids.push(el("div", { class: "mica-sub" }, "Captures:"),

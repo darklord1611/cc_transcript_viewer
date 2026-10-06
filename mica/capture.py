@@ -666,6 +666,9 @@ class Capturer:
         rec = self.records[key]
         rt = self.runtime[key]
         due_verify = now - rt.get("last_verify", 0.0) >= self.verify_seconds and rt.get("dirty_since_verify")
+        # After a stretch without access, compare the whole file once it can
+        # be read again, even if its stat looks unchanged.
+        due_verify = due_verify or rt.get("unreadable")
         # Fast path, as for directories: an unchanged signature needs no
         # strict per-component open; any difference falls through to it.
         if not due_verify:
@@ -708,6 +711,8 @@ class Capturer:
         try:
             if rt.get("unreadable"):
                 rt["unreadable"] = False
+                self._event(key, "readable_again", {})
+                full_verify = True
             rt["stat"] = _sig(fst)
             rec["last_stat"] = _sig(fst)
             rec["last_mtime"] = fst.st_mtime

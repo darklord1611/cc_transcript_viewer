@@ -53,7 +53,6 @@ class RecordingSettingsTests(unittest.TestCase):
         (self.claude / "settings.json").write_text("{invalid")
         self.assertEqual(len(self.check()), 2)
         self.configure()
-        settings_check._CACHE.clear()
         with mock.patch.object(Path, "read_text", side_effect=PermissionError("denied")):
             self.assertEqual(len(self.check()), 3)
 
@@ -62,23 +61,18 @@ class RecordingSettingsTests(unittest.TestCase):
         self.codex.rmdir()
         self.assertEqual(self.check(), [])
 
-    def test_tables_comments_and_active_profiles_on_old_python(self):
-        for parser in (settings_check.tomllib, None):
-            with self.subTest(parser=parser), mock.patch.object(settings_check, "tomllib", parser):
-                settings_check._CACHE.clear()
-                self.configure(codex='# model_reasoning_summary = "detailed"\n[profiles.other]\nmodel_reasoning_summary = "detailed"\n')
-                self.assertEqual([i["setting"] for i in self.check()], ["model_reasoning_summary"])
-                self.configure(codex="model_reasoning_summary = 'detailed' # comment\nprofile = 'work'\n[profiles.work]\nmodel_reasoning_summary = 'none'\n")
-                self.assertEqual([i["setting"] for i in self.check()], ["profiles.work.model_reasoning_summary"])
-                self.configure(codex="model_reasoning_summary = 'detailed'\n[profiles.work]\nmodel_reasoning_summary = 'none'\n")
-                self.assertEqual(self.check(), [])
-
-    def test_unchanged_settings_stay_cached(self):
-        self.configure()
+    def test_tables_comments_and_active_profiles(self):
+        self.configure(codex='# model_reasoning_summary = "detailed"\n[profiles.other]\nmodel_reasoning_summary = "detailed"\n')
+        self.assertEqual([i["setting"] for i in self.check()], ["model_reasoning_summary"])
+        self.configure(codex="model_reasoning_summary = 'detailed' # comment\nprofile = 'work'\n[profiles.work]\nmodel_reasoning_summary = 'none'\n")
+        self.assertEqual([i["setting"] for i in self.check()], ["profiles.work.model_reasoning_summary"])
+        self.configure(codex="model_reasoning_summary = 'detailed'\n[profiles.work]\nmodel_reasoning_summary = 'none'\n")
         self.assertEqual(self.check(), [])
-        with mock.patch.object(Path, "read_text", side_effect=AssertionError("should not read unchanged config")):
-            self.assertEqual(self.check(), [])
 
+    def test_codex_check_is_skipped_without_tomllib(self):
+        self.configure(codex='model_reasoning_summary = "none"\n')
+        with mock.patch.object(settings_check, "tomllib", None):
+            self.assertEqual(self.check(), [])
 
 if __name__ == "__main__":
     unittest.main()

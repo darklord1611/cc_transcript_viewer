@@ -10,11 +10,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import tempfile
 import threading
+import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+
+import claude_parser as claude
+import codex_parser as codex
+import cursor_parser as cursor
+import opencode_parser as opencode
+import server
 
 
 def patch_server_files(server_module, tmp: Path):
@@ -67,6 +75,118 @@ def http_get(port: int, path: str, timeout: float = 10):
             return e.code, e.headers, e.read()
         finally:
             e.close()
+
+
+def _send_json(port: int, method: str, path: str, payload: dict, timeout: float = 5):
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=json.dumps(payload).encode(),
+        method=method,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.headers, r.read()
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, e.headers, e.read()
+        finally:
+            e.close()
+
+
+class ViewerServerTestCase(unittest.TestCase):
+    """A live viewer on a loopback port, with every parser pointed at hermetic
+    temp fixtures: four Claude sessions, Codex guardian sessions, Cursor CLI
+    JSONL and store.db sessions, and an opencode database."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(cls._tmp.name)
+        cls.projects_dir = tmp / "projects"
+        cls.projects_dir.mkdir()
+        cls.fixture = _write_fixture_session(cls.projects_dir)
+        cls.priority_fixture = _write_fixture_session(
+            cls.projects_dir,
+            "22222222-2222-2222-2222-222222222222",
+            "priorityword in the first user message",
+        )
+        cls.later_prompt_fixture = _write_fixture_session(
+            cls.projects_dir,
+            "33333333-3333-3333-3333-333333333333",
+            "unrelated opening prompt",
+            ("laterpromptword in a subsequent user message",),
+        )
+        cls.metadata_fixture = _write_fixture_session(
+            cls.projects_dir,
+            "44444444-4444-4444-4444-444444444444",
+            "ordinary opening prompt",
+            extra_records=(
+                {"type": "ai-title", "aiTitle": "Generated title"},
+                {"type": "custom-title", "customTitle": "nativepriority title"},
+                {"type": "agent-name", "agentName": "reviewer"},
+                {"type": "pr-link", "prNumber": 42,
+                 "prUrl": "https://example.test/org/repo/pull/42",
+                 "prRepository": "org/repo"},
+                {"type": "system", "subtype": "compact_boundary",
+                 "timestamp": "2024-01-01T00:01:00Z", "content": "Conversation compacted",
+                 "compactMetadata": {
+                     "trigger": "manual", "preTokens": 12000, "postTokens": 3500,
+                     "durationMs": 1250, "preservedMessages": {"uuids": ["a", "b"]},
+                     "preCompactDiscoveredTools": ["Read", "Edit"],
+                 }},
+            ),
+        )
+        cls._old_parser_config = (
+            claude.PROJECTS_DIR,
+            codex.CODEX_HOME,
+            (cursor.DB_PATH, cursor.PROJECTS_DIR, cursor.CHATS_DIR),
+            opencode.DB_PATH,
+        )
+        claude.configure(cls.projects_dir)
+        # Hermetic viewer-owned files — never touch the user's real names.json
+        # or ~/.cache summary file from the test suite.
+        cls._old_server_files = patch_server_files(server, tmp)
+        cls.codex_parent, cls.codex_guardian, cls.codex_image = _write_guardian_sessions(tmp / "codex")
+        codex.configure(tmp / "codex")
+        cls.cursor_projects = tmp / "cursor-projects"
+        cls.cli_fixture = _write_cli_session(cls.cursor_projects)
+        cls.cursor_chats = tmp / "cursor-chats"
+        cls.cli_store_fixture = _write_cli_store(cls.cursor_chats)
+        cursor.configure(
+            tmp / "cursor",
+            projects_dir=cls.cursor_projects,
+            chats_dir=cls.cursor_chats,
+        )
+        cls.opencode_db = tmp / "opencode" / "opencode.db"
+        cls.opencode_parent, cls.opencode_child = _write_opencode_db(cls.opencode_db)
+        opencode.configure(cls.opencode_db)
+
+        # Serve on an ephemeral loopback port in a background thread.
+        cls.httpd, cls.port, cls.thread = start_http_server(server.Handler)
+
+    @classmethod
+    def tearDownClass(cls):
+        stop_http_server(cls.httpd, cls.thread)
+        restore_server_files(server, cls._old_server_files)
+        claude.configure(cls._old_parser_config[0])
+        codex.configure(cls._old_parser_config[1])
+        cursor.configure(
+            cls._old_parser_config[2][0],
+            projects_dir=cls._old_parser_config[2][1],
+            chats_dir=cls._old_parser_config[2][2],
+        )
+        opencode.configure(cls._old_parser_config[3])
+        cls._tmp.cleanup()
+
+    def get(self, path: str):
+        return http_get(self.port, path, timeout=5)
+
+    def put_json(self, path: str, payload: dict):
+        return _send_json(self.port, "PUT", path, payload)
+
+    def post_json(self, path: str, payload: dict):
+        return _send_json(self.port, "POST", path, payload)
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:

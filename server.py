@@ -93,6 +93,7 @@ CUSTOM_NAMES_FILE = DEFAULT_CUSTOM_NAMES_FILE
 # Read-only view of Mica, or None when the feature is off (the
 # default unless a store exists at micastore.DEFAULT_STORE_DIR or --mica).
 MICA: micastore.StoreReader | None = None
+MICA_ERROR: str | None = None  # last failure attaching store state to the list
 
 # Full-session parsers for Mica's copies, by the parser name the store records.
 MICA_PARSERS = {"claude": claude, "codex": codex}
@@ -289,14 +290,13 @@ def list_sessions() -> list[dict]:
 # Mica (optional, read-only)
 # ---------------------------------------------------------------------------
 def _apply_mica(sessions: list) -> None:
-    """Attach each live session's mica state, and add a row for every
-    captured transcript whose live file is gone or lost access prevents it
-    from appearing in the live list (read from Mica's copy)."""
+    """Attach each live session's mica state, and add a row, read from
+    Mica's copy, for every captured transcript no live session matches."""
+    global MICA_ERROR
     reader = MICA
     if reader is None:
         return
     try:
-        reader.index()
         live_keys = set()
         for s in sessions:
             path = s.get("file") or ""
@@ -307,34 +307,44 @@ def _apply_mica(sessions: list) -> None:
                 s["mica"] = reader.badge(key)
                 live_keys.add(key)
         for key, entry in reader.index().items():
-            if key in live_keys:
-                continue
-            badge = reader.badge(key)
-            if entry.get("status") != "deleted" and "unreadable" not in badge["flags"]:
-                continue
-            parser = MICA_PARSERS.get(entry.get("parser"))
-            record = reader.record(key)
-            gen = reader.best_generation(record) if record else None
-            gen_path = reader.generation_path(key, gen) if gen else None
-            if parser is None or gen_path is None or not gen_path.is_file():
-                continue
-            try:
-                summary = dict(parser.session_summary(gen_path))
-            except (OSError, ValueError):
-                continue
-            summary["mica"] = dict(badge, copy=True, generation=gen["id"])
-            sessions.append(summary)
-    except Exception:  # noqa: BLE001 - the store is optional; never break the list
-        return
+            if key not in live_keys:
+                sessions.append(_mica_copy_row(reader, key, entry))
+        MICA_ERROR = None
+    except Exception as e:  # noqa: BLE001 - report it rather than break the list
+        MICA_ERROR = f"could not read the store: {e}"
+
+
+def _mica_copy_row(reader, key: str, entry: dict) -> dict:
+    badge = dict(reader.badge(key), copy=True)
+    parser = MICA_PARSERS.get(entry.get("parser"))
+    record = reader.record(key)
+    gen = reader.best_generation(record) if record else None
+    gen_path = reader.generation_path(key, gen) if gen else None
+    if parser is not None and gen_path is not None:
+        try:
+            summary = dict(parser.session_summary(gen_path))
+            summary["mica"] = dict(badge, generation=gen["id"])
+            return summary
+        except (OSError, ValueError) as e:
+            badge["error"] = f"capture could not be read: {e}"
+    else:
+        badge["error"] = "no readable capture"
+    # Still list it, so nothing in the store goes unseen.
+    return common.make_summary(agent=entry.get("parser") or "", id=key,
+                               file=str(gen_path or reader.files_dir / key),
+                               title=Path(str(entry.get("path") or key)).name, mica=badge)
 
 
 def mica_status() -> dict:
     if MICA is None:
         return {"enabled": False}
     try:
-        return MICA.status()
+        status = MICA.status()
     except Exception as e:  # noqa: BLE001
-        return {"enabled": True, "running": False, "error": str(e)}
+        return {"enabled": True, "running": False, "error": f"could not read the store: {e}"}
+    if MICA_ERROR:
+        status["error"] = MICA_ERROR
+    return status
 
 
 def mica_compare(file_id: str) -> dict:

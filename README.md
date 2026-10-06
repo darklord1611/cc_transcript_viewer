@@ -70,7 +70,8 @@ home folders exist. Missing, different, or unreadable settings produce a banner 
 the setting and file to update. Click **×** to dismiss it; dismissal survives reloads for the same
 set of issues. A new issue, or a setting regressing after it was fixed, shows the reminder again.
 The checks are read-only and independent of Mica: every captured deletion remains flagged,
-whatever the retention setting says.
+whatever the retention setting says. The Codex check needs Python 3.11+ (for `tomllib`) and is
+skipped on older Pythons.
 
 ## Run it
 
@@ -308,9 +309,19 @@ that makes those edits visible:
 
 In the viewer, flagged sessions carry a red tag (**truncated**, **rewritten**, **replaced**,
 **deleted**, **recreated**, **access lost**), the sidebar shows the daemon's status with a "⚠ N flagged" filter, and each
-transcript gets a banner comparing it with its capture, with links to open every earlier capture.
-Transcripts that were deleted from disk stay listed and readable from the store. Without Mica
-installed, none of this appears.
+transcript gets a banner comparing it with its capture, with links to open every earlier capture
+and every event Mica recorded for it; a transcript with recorded events but no flags (say, a Codex
+archive move) gets a neutral banner listing them. The viewer shows the store as recorded: every flag the daemon
+set (including any it has no label for), and every captured transcript, so one the live list doesn't
+show (deleted, unreadable, or unparseable) is listed from Mica's copy. Store-wide gaps (the daemon
+not running, a whole folder unreadable, a file Mica could never open) appear as "N gaps" in the
+sidebar status, and a store it can't read shows as an error there. Without Mica installed, none of
+this appears. The viewer is your repo's code, so an agent can edit it; when it matters, check with
+`python3 -m mica flagged` or read `/Library/Mica` directly.
+
+Sleep needs nothing special: the daemon pauses and resumes with everything else. After a restart,
+launchd starts it again and it records a store-wide `capture_gap` for the downtime (not a flag), then
+re-compares every file that changed while it was stopped.
 
 **Install** (macOS, once; afterwards launchd starts it at every boot with no password). Run from this
 repo's folder, so Python finds the `mica` package:
@@ -319,8 +330,10 @@ repo's folder, so Python finds the `mica` package:
 cd cc_transcript_viewer
 sudo /usr/bin/python3 -m mica install --dry-run   # print every step first
 sudo /usr/bin/python3 -m mica install
+sudo /usr/bin/python3 -m mica install --reinstall          # update an install; keeps the captures
+sudo /usr/bin/python3 -m mica install --reinstall --reset  # same, but deletes every capture first
 python3 -m mica status                            # running? how many captured / flagged?
-python3 -m mica flagged                           # every tamper event, per transcript
+python3 -m mica flagged                           # flagged transcripts with their events, and store-wide gaps
 sudo /usr/bin/python3 -m mica uninstall           # keeps the captures unless --delete-store
 ```
 
@@ -347,7 +360,8 @@ captured) but may be reported up to a minute later, when the periodic full compa
 
 Mica refuses symlinked transcript files and folders, including folders redirected after capture
 starts or while the daemon is stopped. It records lost access and keeps earlier captures; restoring
-the real folder lets capture resume. This prevents symlink redirection, but an agent can still append
+the real folder lets capture resume. A transcript Mica could not read stays flagged **access lost**,
+and its banner shows when access was lost and when it returned (the whole file is re-compared then). This prevents symlink redirection, but an agent can still append
 fabricated messages directly: matching a capture verifies the saved bytes, not who wrote them.
 
 `python3 -m mica daemon --store DIR` runs the same capture loop as you, for trying it out; it
@@ -481,15 +495,15 @@ reported.
 | `static/index.html`, `static/style.css`, `static/app.js` | The single frontend (vanilla JS, no build step). `app.js` dispatches on event kind and renders the Claude Code / Cursor / opencode (block-based) and Codex (flat) shapes, and runs the always-on live-refresh poll loop. When `window.__TRANSCRIPT_EXPORT__` is present (a saved single-file transcript) it renders that session directly and disables everything that needs the server. CDN assets (marked, DOMPurify, KaTeX) are version-pinned with SRI integrity hashes. |
 | `tests/test_security.py` | Zero-dependency security tests (`python3 -m unittest tests.test_security`): asserts no outbound connections at runtime, no network-client imports, loopback default bind, the `Host`-header rebinding guard, that `/api/session` is confined to the transcript roots while `/api/local-image` serves images only, and that every CDN asset is version-pinned and SRI-hashed. |
 | `tests/test_export.py` | Tests for the single-file export: the document inlines its assets and points at no server, transcript text can't break out of the embedded JSON, local images become `data:` URIs (and degrade to a note when missing, oversized, or not an image), and `/api/export` enforces the same path allowlist as `/api/session`. |
-| `tests/test_frontend_browser.py` | One optional Chrome/Chromium journey through the real standalone frontend: transcript rendering, server-only controls, offline behavior, and Copy All. It skips when no supported browser is installed. |
-| `tests/test_server.py` | Cross-source ordering tests: parsed last activity wins over a misleading file mtime, sub-agents remain beside their parent, and malformed or missing activity falls back to mtime. |
+| `tests/test_frontend_browser.py` | Optional Chrome/Chromium journeys: the real standalone frontend (transcript rendering, server-only controls, offline behavior, Copy All), and the live page against a scripted API (dismissing and re-showing the settings banner across polls, a Mica capture failure in the sidebar, and an access-lost transcript's gap). It skips when no supported browser is installed. |
+| `tests/test_server.py` | Custom names and title-weighted search, plus cross-source ordering tests: parsed last activity wins over a misleading file mtime, sub-agents remain beside their parent, and malformed or missing activity falls back to mtime. |
 | `tests/test_cursor_to_codex.py`, `tests/test_opencode_to_codex.py` | Exporter tests: encrypted reasoning and tool records survive conversion, timestamps remain attached to the right records, and the output reparses through `codex_parser`. |
 | `tests/test_claude_parser.py`, `tests/test_codex_parser.py`, `tests/test_cursor_parser.py`, `tests/test_opencode_parser.py` | Characterization tests for each parser's internals — branch folding and queued prompts (Claude), the JS-literal orchestration parser (Codex), blob/JSON extraction and diff reconstruction (Cursor), and the part→event mapping (opencode). |
 | `tests/test_event_schema.py` | Conformance tests: every parser's summaries and full parses must satisfy `event_schema.py`, and `app.js` must dispatch on every declared kind. |
 | `tests/test_golden_transcripts.py`, `tests/fixtures/` | Regression tests over checked-in, fictional transcript files whose field shapes were compared with current local stores. The fixture README records the sanitization and review rules. |
 | `tests/test_summary_cache.py`, `tests/test_common.py` | Unit tests for the shared layer: summary-cache round-trip persistence, fingerprint invalidation and dirty-flag races, plus the small helpers in `common.py`. |
-| `tests/test_mica.py` | Mica tests with a fake clock: appends, truncation, emptied files, near-end and deep rewrites, atomic replacements, deletions (flagged regardless of age or retention settings), delete-then-recreate, Codex archive moves, forks and in-file branches (not flagged), offline changes, lost access (a gap, not a deletion), symlinks, crash recovery, hash-chain verification, the viewer's badges/copies/compare endpoint (and that it never writes to the store), and the installer's plan. |
-| `tests/fixture_builders.py` | Shared fixture builders that write temporary minimal-but-valid transcripts and databases for each source. |
+| `tests/test_mica.py` | Mica tests with a fake clock: appends, truncation, emptied files, near-end and deep rewrites, atomic replacements, deletions (flagged regardless of age or retention settings), delete-then-recreate, Codex archive moves, forks and in-file branches (not flagged), offline changes, lost access (flagged with a recorded start and end, not a deletion), symlinks, crash recovery, hash-chain verification, the viewer's badges/copies/compare endpoint (and that it never writes to the store), and the installer's plan (which stops a running daemon before re-granting access). |
+| `tests/fixture_builders.py` | Shared fixture builders that write temporary minimal-but-valid transcripts and databases for each source, and `ViewerServerTestCase`, a live loopback server over those fixtures. |
 
 ### Transcript format notes
 
