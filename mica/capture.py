@@ -438,6 +438,12 @@ class Capturer:
                 self._event(None, kind, {"source": src.name, "root": str(src.root), "error": state["error"]})
             elif prev is None and not state["ok"]:
                 self._event(None, "access_lost", {"source": src.name, "root": str(src.root), "error": state["error"]})
+            if not state["ok"] and (prev is None or prev["ok"]):
+                # Mark every affected transcript immediately, including cold
+                # files which would otherwise wait for their next stat cycle.
+                for key, rec in self.records.items():
+                    if rec.get("status") == "active" and rec.get("source") == src.name:
+                        self._mark_unreadable(key, OSError(state["error"]))
             self.source_state[src.name] = state
 
     def _full_scan(self, now: float, preexisting: bool = False) -> None:
@@ -714,7 +720,8 @@ class Capturer:
         rt = self.runtime[key]
         if not rt.get("unreadable"):
             rt["unreadable"] = True
-            self._event(key, "unreadable", {"error": exc.strerror or str(exc)})
+            self._flag(key, "unreadable", {"error": exc.strerror or str(exc)})
+            self._save_record(key, self.records[key])
 
     def _process_open(self, key, rec, rt, live, st, now, full_verify, detail_base) -> None:
         gen = self._current(rec)

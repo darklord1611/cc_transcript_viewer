@@ -47,7 +47,7 @@ class SymlinkSecurity(unittest.TestCase):
         for d in (self.projects, self.codex_sessions, self.codex_archived):
             d.mkdir(parents=True)
         self.store_dir = self.tmp / "mica"
-        # Real time: retention checks compare against the files' real mtimes.
+        # Start from real time so heartbeat ages match the fake clock.
         self.now = time.time()
         self.capturer = self._new_capturer()
 
@@ -115,6 +115,7 @@ class SymlinkSecurity(unittest.TestCase):
         self.assertEqual(len(rec["generations"]), 1)
         self.assertEqual(self.reader.generation_path(key, rec["generations"][0]).read_text(), original)
         self.assertIn("unreadable", self.events_of(key))
+        self.assertEqual(rec["flags"], ["unreadable"])
         self.assertEqual(capture.verify_store(self.store_dir), [])
 
     def test_tracked_project_redirect_cannot_append_fake_messages(self):
@@ -142,7 +143,7 @@ class SymlinkSecurity(unittest.TestCase):
         self.tick()
         self.assertTrue(self.capturer.source_state["claude"]["ok"])
         rec = self.reader.record(key)
-        self.assertEqual(rec["flags"], [])
+        self.assertEqual(rec["flags"], ["unreadable"])
         self.assertEqual(len(rec["generations"]), 1)
         self.assertEqual(self.reader.generation_path(key, rec["generations"][0]).read_text(), original + _line({"real": True}))
         global_events = [e["type"] for e in v.read_jsonl(self.store_dir / v.EVENTS_FILE)]

@@ -99,14 +99,18 @@ def cmd_status(args) -> int:
 
 def cmd_flagged(args) -> int:
     reader = _reader(args)
-    flagged = [(k, e) for k, e in sorted(reader.index().items()) if e.get("flags")]
+    flagged = []
+    for key, entry in sorted(reader.index().items()):
+        flags = reader.badge(key)["flags"]
+        if flags:
+            flagged.append((key, dict(entry, flags=flags)))
     if not flagged:
         print("no flagged transcripts")
         return 0
     for key, entry in flagged:
         print(f"{key}  [{', '.join(entry['flags'])}]  {entry.get('path')}")
         for event in reader.events(key):
-            if event.get("type") in v.TAMPER_EVENTS:
+            if event.get("type") in v.FLAG_EVENTS:
                 print(f"    {event.get('t')}  {event.get('type')}  {json.dumps(event.get('detail') or {})}")
     return 0
 

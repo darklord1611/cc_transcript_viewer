@@ -328,6 +328,42 @@ function fmtDuration(ms) {
 const EXPORT_DATA = window.__TRANSCRIPT_EXPORT__ || null;
 const STANDALONE = !!EXPORT_DATA;
 
+// ---------- recommended recording settings (independent of Mica) ----------
+const SETUP_DISMISS_KEY = "transcript-viewer:setup-dismissed";
+let SETUP_DISMISSED = "";
+let SETUP_RENDERED = null;
+try { SETUP_DISMISSED = localStorage.getItem(SETUP_DISMISS_KEY) || ""; } catch (_error) {}
+
+function renderSetupBanner(setup) {
+  const box = $("#setup-banner");
+  if (!box || STANDALONE) return;
+  const issues = (setup && setup.issues) || [];
+  const sig = JSON.stringify(issues);
+  // Once settings are fixed, a later regression should produce a new warning.
+  if (!issues.length && SETUP_DISMISSED) {
+    SETUP_DISMISSED = "";
+    try { localStorage.removeItem(SETUP_DISMISS_KEY); } catch (_error) {}
+  }
+  box.hidden = !issues.length || sig === SETUP_DISMISSED;
+  if (box.hidden || sig === SETUP_RENDERED) return;
+  SETUP_RENDERED = sig;
+  box.replaceChildren(
+    el("div", { class: "setup-banner-body" },
+      el("strong", {}, "Recommended transcript settings are missing or differ:"),
+      el("ul", {}, issues.map((item) => el("li", {},
+        `${item.agent}: set `,
+        el("code", {}, item.setting + " = " + JSON.stringify(item.recommended)),
+        " in ", el("code", {}, item.path), ". " + item.reason))),
+      el("span", { class: "muted" }, "These settings affect future recording. Restart the agent after changing them.")),
+    el("button", { class: "setup-dismiss", type: "button", title: "Dismiss settings reminder",
+      "aria-label": "Dismiss settings reminder", onclick: () => {
+        SETUP_DISMISSED = sig;
+        try { localStorage.setItem(SETUP_DISMISS_KEY, sig); } catch (_error) {}
+        box.hidden = true;
+      } }, "×")
+  );
+}
+
 // ---------- state ----------
 let SESSIONS = [];
 let SESSIONS_LOADED = false;
@@ -362,6 +398,7 @@ async function loadSessions() {
   SESSIONS = data.sessions || [];
   SESSIONS_LOADED = true;
   MICA_STATUS = data.mica || { enabled: false };
+  renderSetupBanner(data.setup);
   LAST_SIG = sessionsSignature(SESSIONS);
   buildFilters();
   renderSidebar($("#search").value || "");
@@ -2245,6 +2282,7 @@ const MICA_FLAG_LABELS = {
   replaced: "replaced",
   deleted: "deleted",
   recreated: "recreated after deletion",
+  unreadable: "access lost",
 };
 
 function isMicaFlagged(s) {
@@ -2255,14 +2293,12 @@ function isMicaFlagged(s) {
 function micaTag(s) {
   const vt = s.mica;
   if (!vt) return null;
-  if (vt.copy) {
-    return vt.state === "expired"
-      ? el("span", { class: "mica-tag mica-info", title: "Removed by Claude Code's retention cleanup; shown from Mica's capture" }, "archived")
-      : el("span", { class: "mica-tag mica-bad", title: "The live transcript was deleted; shown from Mica's capture" }, "deleted");
+  if (vt.copy && vt.state === "deleted") {
+    return el("span", { class: "mica-tag mica-bad", title: "The live transcript was deleted; shown from Mica's capture" }, "deleted");
   }
   if (!vt.flags.length) return null;
   const labels = vt.flags.map((f) => MICA_FLAG_LABELS[f] || f);
-  return el("span", { class: "mica-tag mica-bad", title: "Changed after the store captured it: " + labels.join(", ") }, "⚠ " + vt.flags[0]);
+  return el("span", { class: "mica-tag mica-bad", title: "Mica recorded: " + labels.join(", ") }, "⚠ " + labels[0]);
 }
 
 function fmtBytes(n) {
@@ -2287,9 +2323,14 @@ function renderMicaStatus() {
     renderSidebar($("#search").value);
   }
   const busy = v.running && v.cpu_warn;
-  const key = [v.running, v.n_files, flagged, FLAGGED_ONLY, busy && v.cpu_percent].join("|");
+  const failures = Object.entries(v.sources || {}).filter(([, src]) => src.ok === false);
+  const incomplete = v.running && failures.length > 0;
+  const key = [v.running, v.n_files, flagged, FLAGGED_ONLY, busy && v.cpu_percent,
+    JSON.stringify(failures)].join("|");
   const age = v.heartbeat_age == null ? null : Math.round(v.heartbeat_age);
-  box.title = busy
+  box.title = incomplete
+    ? "Mica cannot capture: " + failures.map(([name, src]) => `${name}: ${src.error}`).join("; ")
+    : busy
     ? `Mica is using ${v.cpu_percent}% of one CPU core (it normally uses well under 1%). ` +
       "Check `python3 -m mica status`; something may be making it work too hard."
     : v.running
@@ -2299,11 +2340,11 @@ function renderMicaStatus() {
   if (key === MICA_STATUS_KEY) return;
   MICA_STATUS_KEY = key;
   box.hidden = false;
-  box.className = "mica-status" + (v.running ? (busy ? " mica-busy" : "") : " mica-down");
+  box.className = "mica-status" + (!v.running || incomplete ? " mica-down" : busy ? " mica-busy" : "");
   // replaceChildren (unlike el) would render a null child as the text "null".
   box.replaceChildren(...[
     el("span", { class: "mica-dot", "aria-hidden": "true" }),
-    el("span", {}, v.running ? "Mica capturing" : "Mica not running"),
+    el("span", {}, incomplete ? "⚠ Mica capture incomplete" : v.running ? "Mica capturing" : "Mica not running"),
     busy ? el("span", { class: "mica-cpu" }, `⚠ ${v.cpu_percent}% CPU`) : null,
     el("span", { class: "mica-count" }, `${v.n_files} captured`),
     flagged
@@ -2432,6 +2473,8 @@ function fillMicaBanner(box, lock, r, data) {
     case "ahead":
       if (!flags.length) {
         kids.push(line("🔒 Matches Mica's capture" + (r.state === "ahead" ? " (the newest lines are still being copied)." : ".")));
+      } else if (flags.length === 1 && flags[0] === "unreadable") {
+        kids.push(line("The current bytes match Mica's latest capture."));
       } else if (flags.length === 1 && flags[0] === "recreated") {
         kids.push(line("⚠ A transcript at this path was deleted, and this file was started afresh afterwards."));
       } else {
@@ -2453,13 +2496,13 @@ function fillMicaBanner(box, lock, r, data) {
       kids.push(line(`🗑 The live transcript was deleted${deletedEv ? " at " + fmtTime(deletedEv.t) : ""}. ` +
         (copy ? "What you're reading is Mica's copy." : "")));
       break;
-    case "expired":
-      tone = "info";
-      kids.push(line(`🗄 Claude Code's retention cleanup removed this transcript${deletedEv ? " at " + fmtTime(deletedEv.t) : ""}; ` +
-        "Mica kept a copy."));
-      break;
     default:
       return;
+  }
+
+  if (flags.includes("unreadable")) {
+    kids.push(line("⚠ Mica lost read access to this transcript. Activity during that gap may not have been captured; " +
+      "this warning remains after access is restored."));
   }
 
   if (copy) {
@@ -2550,6 +2593,7 @@ async function pollSidebar() {
       const body = await res.json();
       next = body.sessions || [];
       MICA_STATUS = body.mica || { enabled: false };
+      renderSetupBanner(body.setup);
     } catch (e) { return; } // server momentarily unreachable; retry next tick
     const sig = sessionsSignature(next);
     if (sig !== LAST_SIG) {

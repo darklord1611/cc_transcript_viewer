@@ -48,6 +48,7 @@ import common
 import cursor_parser as cursor
 import export_html
 import opencode_parser as opencode
+import settings_check
 from mica import store as micastore
 
 STATIC_DIR = export_html.STATIC_DIR
@@ -287,19 +288,15 @@ def list_sessions() -> list[dict]:
 # ---------------------------------------------------------------------------
 # Mica (optional, read-only)
 # ---------------------------------------------------------------------------
-def _claude_cleanup_days() -> int:
-    return micastore.claude_cleanup_days(claude.PROJECTS_DIR.parent / "settings.json")
-
-
 def _apply_mica(sessions: list) -> None:
     """Attach each live session's mica state, and add a row for every
-    captured transcript whose live file is gone (read from Mica's copy)."""
+    captured transcript whose live file is gone or lost access prevents it
+    from appearing in the live list (read from Mica's copy)."""
     reader = MICA
     if reader is None:
         return
     try:
         reader.index()
-        cleanup_days = _claude_cleanup_days()
         live_keys = set()
         for s in sessions:
             path = s.get("file") or ""
@@ -307,10 +304,13 @@ def _apply_mica(sessions: list) -> None:
                 continue
             key = reader.key_for_path(path)
             if key:
-                s["mica"] = reader.badge(key, cleanup_days)
+                s["mica"] = reader.badge(key)
                 live_keys.add(key)
-        for key, entry in reader.deleted_entries():
+        for key, entry in reader.index().items():
             if key in live_keys:
+                continue
+            badge = reader.badge(key)
+            if entry.get("status") != "deleted" and "unreadable" not in badge["flags"]:
                 continue
             parser = MICA_PARSERS.get(entry.get("parser"))
             record = reader.record(key)
@@ -322,7 +322,7 @@ def _apply_mica(sessions: list) -> None:
                 summary = dict(parser.session_summary(gen_path))
             except (OSError, ValueError):
                 continue
-            summary["mica"] = dict(reader.badge(key, cleanup_days), copy=True, generation=gen["id"])
+            summary["mica"] = dict(badge, copy=True, generation=gen["id"])
             sessions.append(summary)
     except Exception:  # noqa: BLE001 - the store is optional; never break the list
         return
@@ -352,13 +352,13 @@ def mica_compare(file_id: str) -> dict:
     if located:
         key, gen, record = located
         live = record.get("path") if record.get("status") == "active" else None
-        result = MICA.compare(key, live, _claude_cleanup_days())
+        result = MICA.compare(key, live)
         result["viewing_generation"] = gen.get("id")
         return result
     key = MICA.key_for_path(str(target))
     if key is None:
         return {"state": "untracked"}
-    return MICA.compare(key, target, _claude_cleanup_days())
+    return MICA.compare(key, target)
 
 
 def _recency(s: dict) -> float:
@@ -868,7 +868,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/sessions":
             try:
-                self._send_json({"sessions": list_sessions(), "mica": mica_status()})
+                self._send_json({"sessions": list_sessions(), "mica": mica_status(),
+                                 "setup": settings_check.check_settings(claude.PROJECTS_DIR.parent, codex.CODEX_HOME)})
             except Exception as e:  # noqa: BLE001
                 self._send_json({"error": str(e)}, status=500)
             return

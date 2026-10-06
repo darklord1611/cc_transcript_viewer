@@ -52,6 +52,7 @@ RECORD_FILE = "record.json"
 # Tamper events flag a session; info events are recorded but expected; gap
 # events mark periods when capture could not see (part of) a transcript.
 TAMPER_EVENTS = frozenset({"truncated", "rewritten", "replaced", "deleted", "recreated"})
+FLAG_EVENTS = TAMPER_EVENTS | {"unreadable"}
 INFO_EVENTS = frozenset({"moved", "inode_changed", "daemon_started"})
 GAP_EVENTS = frozenset({"unreadable", "access_lost", "access_restored", "capture_gap"})
 
@@ -61,10 +62,6 @@ HEARTBEAT_STALE_SECONDS = 30
 # The daemon normally uses well under 1% of one core; above this the viewer
 # shows a warning, since something (a huge tree, a bug) is making it work hard.
 CPU_WARN_PERCENT = 2.0
-
-# Claude Code's default transcript retention when settings.json doesn't set
-# cleanupPeriodDays. Deletions of files older than the retention are expected.
-CLAUDE_DEFAULT_CLEANUP_DAYS = 30
 
 _KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
 _GEN_RE = re.compile(r"^g\d{4,}$")
@@ -150,16 +147,6 @@ def read_jsonl(path: Path) -> list:
     except OSError:
         pass
     return out
-
-
-def claude_cleanup_days(settings_path: Path | None = None) -> int:
-    """Claude Code's configured transcript retention, in days."""
-    path = settings_path or (Path.home() / ".claude" / "settings.json")
-    data = read_json(path)
-    value = data.get("cleanupPeriodDays") if isinstance(data, dict) else None
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
-        return int(value)
-    return CLAUDE_DEFAULT_CLEANUP_DAYS
 
 
 def _clip(text: str, n: int) -> str:
@@ -319,6 +306,7 @@ class StoreReader:
         self._by_path: dict = {}
         self._realpaths: dict = {}
         self._records: dict = {}
+        self._access_gaps: dict = {}
 
     # ----- mica-level state ------------------------------------------------
     def available(self) -> bool:
@@ -335,7 +323,7 @@ class StoreReader:
         last = parse_iso(hb.get("last_poll"))
         age = None if last is None else max(0.0, time.time() - last)
         index = self.index()
-        flagged = sum(1 for e in index.values() if e.get("flags"))
+        flagged = sum(1 for key, e in index.items() if self._flags(key, e.get("flags")))
         cpu = hb.get("cpu_percent")
         cpu = cpu if isinstance(cpu, (int, float)) and not isinstance(cpu, bool) else None
         return {
@@ -413,6 +401,30 @@ class StoreReader:
             return []
         return read_jsonl(self.files_dir / key / EVENTS_FILE)
 
+    def _flags(self, key: str, recorded_flags) -> list:
+        if not valid_key(key):
+            return []
+        flags = [f for f in recorded_flags or [] if f in FLAG_EVENTS]
+        if "unreadable" in flags:
+            return flags
+        cached = self._access_gaps.get(key)
+        if cached and cached[1]:
+            return flags + ["unreadable"]
+        # Older installed daemons log access loss without adding a flag. Keep
+        # that history visible too; only re-read the log when it changes.
+        path = self.files_dir / key / EVENTS_FILE
+        try:
+            st = path.stat()
+            fp = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            fp = None
+        if cached is None or cached[0] != fp:
+            lost = any(ev.get("type") == "unreadable" for ev in self.events(key)) if fp else False
+            self._access_gaps[key] = (fp, lost)
+        if self._access_gaps[key][1]:
+            flags.append("unreadable")
+        return flags
+
     def generation_path(self, key: str, gen: dict) -> Path | None:
         mirror = gen.get("mirror") if isinstance(gen, dict) else None
         if not valid_key(key) or not isinstance(mirror, str):
@@ -443,27 +455,13 @@ class StoreReader:
         return None
 
     # ----- the viewer's questions ------------------------------------------
-    def badge(self, key: str, cleanup_days: int | None = None) -> dict:
+    def badge(self, key: str) -> dict:
         """Compact per-session mica state for the sidebar, from the index
-        only (no file reads)."""
+        and cached access-loss history."""
         entry = self.index().get(key) or {}
-        flags = [f for f in entry.get("flags") or [] if f in TAMPER_EVENTS]
+        flags = self._flags(key, entry.get("flags"))
         state = entry.get("status") or "active"
-        if state == "deleted" and flags == ["deleted"] and self._expired(entry, cleanup_days):
-            state, flags = "expired", []
         return {"key": key, "state": state, "flags": flags, "generations": entry.get("gens", 1)}
-
-    def _expired(self, entry: dict, cleanup_days: int | None) -> bool:
-        """Was a deleted file old enough that its harness's own retention
-        cleanup explains the deletion?"""
-        if entry.get("parser") != "claude":
-            return False
-        days = cleanup_days if cleanup_days is not None else claude_cleanup_days()
-        deleted_at = parse_iso(entry.get("deleted_at"))
-        last_mtime = entry.get("last_mtime")
-        if deleted_at is None or not isinstance(last_mtime, (int, float)):
-            return False
-        return deleted_at - last_mtime >= days * 86400
 
     def deleted_entries(self) -> list:
         """(key, entry) for captured files whose live transcript is gone."""
@@ -505,7 +503,7 @@ class StoreReader:
             changes.append(change)
         return changes
 
-    def compare(self, key: str, live_path, cleanup_days: int | None = None) -> dict:
+    def compare(self, key: str, live_path) -> dict:
         """Full comparison of a live transcript with its capture.
 
         state:
@@ -513,7 +511,6 @@ class StoreReader:
           ahead     live file extends the capture (newest bytes not yet copied)
           modified  live file is shorter than, or differs from, the capture
           deleted   no live file; the store still has the capture
-          expired   deleted, but old enough that harness retention explains it
         """
         record = self.record(key)
         if record is None:
@@ -526,7 +523,7 @@ class StoreReader:
             "path": record.get("path"),
             "first_seen": record.get("first_seen"),
             "preexisting": bool(record.get("preexisting")),
-            "flags": [f for f in record.get("flags") or [] if f in TAMPER_EVENTS],
+            "flags": self._flags(key, record.get("flags")),
             "recreated_from": record.get("recreated_from"),
             "generations": [],
             "events": self.events(key),
@@ -553,10 +550,7 @@ class StoreReader:
         live = Path(live_path) if live_path else None
         live_exists = live is not None and live.is_file()
         if not live_exists:
-            entry = self.index().get(key) or {}
-            result["state"] = "expired" if self._expired(entry, cleanup_days) and result["flags"] == ["deleted"] else "deleted"
-            if result["state"] == "expired":
-                result["flags"] = []
+            result["state"] = "deleted"
             return result
 
         current = gens[-1] if gens and not gens[-1].get("closed") else None

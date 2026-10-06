@@ -53,6 +53,8 @@ setting applies retroactively, so change them before you accumulate sessions you
 Restart Claude Code (or run `/config` once) for the change to take effect. Note this only stops
 *future* deletion — anything already cleaned up is gone.
 
+The viewer accepts `cleanupPeriodDays >= 10000`; the example above keeps transcripts for longer.
+
 **Codex** — add to `~/.codex/config.toml`:
 
 ```toml
@@ -62,6 +64,13 @@ model_reasoning_summary = "detailed"
 Codex doesn't save raw chain-of-thought in readable form for OpenAI models, but with this set it
 saves readable summaries of it. Encrypted-only reasoning records contain no displayable text and are
 omitted by the viewer.
+
+The live viewer automatically checks these three recommendations for agents whose configured
+home folders exist. Missing, different, or unreadable settings produce a banner at the top with
+the setting and file to update. Click **×** to dismiss it; dismissal survives reloads for the same
+set of issues. A new issue, or a setting regressing after it was fixed, shows the reminder again.
+The checks are read-only and independent of Mica: every captured deletion remains flagged,
+whatever the retention setting says.
 
 ## Run it
 
@@ -291,11 +300,13 @@ that makes those edits visible:
   deleted, the daemon records a timestamped event and keeps the earlier capture intact, starting a new
   capture from the file's new contents. Each capture is hash-chained (`python3 -m mica verify`).
 - Branches and forks are not flagged: Claude Code appends rewinds/edits to the same file, and a fork
-  or sub-agent is a new file. Codex archiving a rollout is recognized as a move. Deletions that
-  Claude Code's own retention cleanup explains (older than `cleanupPeriodDays`) show as "archived".
+  or sub-agent is a new file. Codex archiving a rollout is recognized as a move. Every captured
+  transcript deletion stays flagged, including old transcripts removed by retention cleanup.
+  Mica does not use retention settings to suppress warnings: those settings are agent-writable,
+  and a file's age cannot establish who deleted it.
 
 In the viewer, flagged sessions carry a red tag (**truncated**, **rewritten**, **replaced**,
-**deleted**, **recreated**), the sidebar shows the daemon's status with a "⚠ N flagged" filter, and each
+**deleted**, **recreated**, **access lost**), the sidebar shows the daemon's status with a "⚠ N flagged" filter, and each
 transcript gets a banner comparing it with its capture, with links to open every earlier capture.
 Transcripts that were deleted from disk stay listed and readable from the store. Without Mica
 installed, none of this appears.
@@ -325,8 +336,8 @@ that way (no `NOPASSWD` sudo; be wary of an agent asking you to run a `sudo` com
 - catch content written and erased between two polls (~1 s);
 - make spoofed tool output honest (if an agent rigs its shell, the transcript faithfully records fake
   results);
-- keep capturing after an agent removes the ACL entries (earlier captures stay safe, and the viewer
-  shows the daemon's access problem);
+- keep capturing after an agent removes the ACL entries (earlier captures stay safe, affected
+  transcripts stay flagged even after access returns, and source access failures appear in the sidebar);
 - see sessions from before it was installed, or Cursor/opencode sessions (SQLite stores, not
   append-only files).
 
@@ -476,7 +487,7 @@ reported.
 | `tests/test_event_schema.py` | Conformance tests: every parser's summaries and full parses must satisfy `event_schema.py`, and `app.js` must dispatch on every declared kind. |
 | `tests/test_golden_transcripts.py`, `tests/fixtures/` | Regression tests over checked-in, fictional transcript files whose field shapes were compared with current local stores. The fixture README records the sanitization and review rules. |
 | `tests/test_summary_cache.py`, `tests/test_common.py` | Unit tests for the shared layer: summary-cache round-trip persistence, fingerprint invalidation and dirty-flag races, plus the small helpers in `common.py`. |
-| `tests/test_mica.py` | Mica tests with a fake clock: appends, truncation, emptied files, near-end and deep rewrites, atomic replacements, deletion vs. retention cleanup, delete-then-recreate, Codex archive moves, forks and in-file branches (not flagged), offline changes, lost access (a gap, not a deletion), symlinks, crash recovery, hash-chain verification, the viewer's badges/copies/compare endpoint (and that it never writes to the store), and the installer's plan. |
+| `tests/test_mica.py` | Mica tests with a fake clock: appends, truncation, emptied files, near-end and deep rewrites, atomic replacements, deletions (flagged regardless of age or retention settings), delete-then-recreate, Codex archive moves, forks and in-file branches (not flagged), offline changes, lost access (a gap, not a deletion), symlinks, crash recovery, hash-chain verification, the viewer's badges/copies/compare endpoint (and that it never writes to the store), and the installer's plan. |
 | `tests/fixture_builders.py` | Shared fixture builders that write temporary minimal-but-valid transcripts and databases for each source. |
 
 ### Transcript format notes

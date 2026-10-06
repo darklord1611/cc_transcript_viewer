@@ -60,7 +60,7 @@ class CaptureTestCase(unittest.TestCase):
         for d in (self.projects, self.codex_sessions, self.codex_archived):
             d.mkdir(parents=True)
         self.store_dir = self.tmp / "mica"
-        # Real time: retention checks compare against the files' real mtimes.
+        # Start from real time so heartbeat ages match the fake clock.
         self.now = time.time()
         self.capturer = self._new_capturer()
 
@@ -113,6 +113,25 @@ class CaptureTestCase(unittest.TestCase):
 
 
 class CaptureScenarios(CaptureTestCase):
+    def test_restoring_original_capture_does_not_clear_rewrite_flag(self):
+        path = self.session(records=[{"text": "original"}])
+        self.capturer.start()
+        key = self.key(path)
+        original = self.reader.generation_path(key, self.reader.record(key)["generations"][0])
+        path.write_text(_line({"text": "tampered"}))
+        self.tick()
+        self.assertEqual(self.reader.badge(key)["flags"], ["rewritten"])
+        path.write_bytes(original.read_bytes())
+        self.tick()
+        result = self.reader.compare(key, path)
+        self.assertEqual(result["state"], "verified")
+        self.assertEqual(result["flags"], ["rewritten"])
+        self.assertEqual(len(result["generations"]), 3)
+        self.assertEqual(self.reader.badge(key)["flags"], ["rewritten"])
+        self.capturer = self._new_capturer()
+        self.capturer.start()
+        self.assertEqual(self.reader.compare(key, path)["flags"], ["rewritten"])
+
     def test_initial_capture_and_appends_verify(self):
         path = self.session()
         self.capturer.start()
@@ -338,17 +357,25 @@ class CaptureScenarios(CaptureTestCase):
         self.tick(n=2)
         self.assertEqual(self.reader.index()[key]["status"], "deleted")
 
-    def test_old_deletions_count_as_retention_cleanup(self):
+    def test_old_deletions_stay_flagged(self):
         path = self.session()
         os.utime(path, (self.now - 40 * 86400, self.now - 40 * 86400))
         self.capturer.start()
         key = self.key(path)
         path.unlink()
         self.tick(n=2)
-        self.assertEqual(self.reader.badge(key, cleanup_days=30)["state"], "expired")
-        self.assertEqual(self.reader.badge(key, cleanup_days=30)["flags"], [])
-        self.assertEqual(self.reader.badge(key, cleanup_days=99999)["state"], "deleted")
-        self.assertEqual(self.reader.compare(key, path, cleanup_days=30)["state"], "expired")
+        self.assertEqual(self.reader.badge(key)["state"], "deleted")
+        self.assertEqual(self.reader.badge(key)["flags"], ["deleted"])
+        result = self.reader.compare(key, path)
+        self.assertEqual(result["state"], "deleted")
+        self.assertEqual(result["flags"], ["deleted"])
+
+        # The original capture remains readable, including after a restart.
+        self.capturer = self._new_capturer()
+        self.capturer.start()
+        self.assertEqual(self.reader.badge(key)["flags"], ["deleted"])
+        gen = self.reader.best_generation(self.reader.record(key))
+        self.assertTrue(self.reader.generation_path(key, gen).is_file())
 
     def test_codex_archive_move_is_not_tampering(self):
         day = self.codex_sessions / "2026" / "09" / "28"
@@ -439,20 +466,59 @@ class CaptureScenarios(CaptureTestCase):
         self.assertEqual(self.reader.record(self.key(kept))["flags"], [])
 
     @unittest.skipIf(os.geteuid() == 0, "root ignores permissions")
-    def test_lost_access_is_a_gap_not_a_deletion(self):
+    def test_lost_access_is_flagged_and_survives_recovery(self):
         path = self.session()
         self.capturer.start()
         key = self.key(path)
         os.chmod(self.projects, 0)
         self.tick(n=3)
         self.assertEqual(self.reader.index()[key]["status"], "active")
-        self.assertEqual(self.reader.record(key)["flags"], [])
+        self.assertEqual(self.reader.record(key)["flags"], ["unreadable"])
+        self.assertEqual(self.reader.badge(key)["flags"], ["unreadable"])
         global_events = [e["type"] for e in v.read_jsonl(self.store_dir / v.EVENTS_FILE)]
         self.assertIn("access_lost", global_events)
         os.chmod(self.projects, 0o755)
         self.tick()
         global_events = [e["type"] for e in v.read_jsonl(self.store_dir / v.EVENTS_FILE)]
         self.assertIn("access_restored", global_events)
+        self.assertEqual(self.reader.compare(key, path)["state"], "verified")
+        self.assertEqual(self.reader.compare(key, path)["flags"], ["unreadable"])
+        self.capturer = self._new_capturer()
+        self.capturer.start()
+        self.assertEqual(self.reader.badge(key)["flags"], ["unreadable"])
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores permissions")
+    def test_individual_file_access_loss_is_flagged(self):
+        path = self.session()
+        self.capturer.start()
+        key = self.key(path)
+        os.chmod(path, 0)
+        try:
+            self.tick()
+            self.assertTrue(self.reader.status()["sources"]["claude"]["ok"])
+            self.assertEqual(self.reader.badge(key)["flags"], ["unreadable"])
+            self.assertEqual(self.reader.status()["n_flagged"], 1)
+        finally:
+            os.chmod(path, 0o644)
+        self.tick()
+        result = self.reader.compare(key, path)
+        self.assertEqual(result["state"], "verified")
+        self.assertEqual(result["flags"], ["unreadable"])
+
+    def test_legacy_access_loss_events_are_visible_and_cached(self):
+        path = self.session()
+        self.capturer.start()
+        key = self.key(path)
+        self.assertEqual(self.reader.badge(key)["flags"], [])
+        # Existing installations record this event without updating flags.
+        self.capturer._event(key, "unreadable", {"error": "permission denied"})
+        reader = self.reader
+        self.assertEqual(reader.record(key)["flags"], [])
+        self.assertEqual(reader.badge(key)["flags"], ["unreadable"])
+        with mock.patch.object(reader, "events", side_effect=AssertionError("unchanged logs must stay cached")):
+            self.assertEqual(reader.badge(key)["flags"], ["unreadable"])
+            self.assertEqual(reader.status()["n_flagged"], 1)
+        self.assertEqual(reader.compare(key, path)["flags"], ["unreadable"])
 
     def test_symlinks_are_not_followed(self):
         outside = self.tmp / "outside.jsonl"
@@ -588,6 +654,51 @@ class ViewerIntegration(CaptureTestCase):
         self.assertEqual(data["mica_copy"]["original_path"], os.path.realpath(self.doomed))
         self.assertFalse(data["mica_copy"]["live"])
         self.assertTrue(any(ev.get("kind") == "user" for ev in data["events"]))
+
+    def test_access_lost_session_remains_visible_when_live_listing_loses_it(self):
+        key = self.reader.key_for_path(str(self.live))
+        self.capturer._event(key, "unreadable", {"error": "permission denied"})
+        sessions = []
+        server._apply_mica(sessions)
+        copy = next(s for s in sessions if s["title"] == "live prompt")
+        self.assertTrue(copy["mica"]["copy"])
+        self.assertEqual(copy["mica"]["state"], "active")
+        self.assertEqual(copy["mica"]["flags"], ["unreadable"])
+        status, data = self.get_json("/api/session?file=" + quote(copy["file"]))
+        self.assertEqual(status, 200)
+        self.assertTrue(data["mica_copy"]["live"])
+
+    def test_retention_settings_cannot_hide_deleted_sessions(self):
+        settings = self.projects.parent / "settings.json"
+        for days in (30, 0.01, 1, 99999):
+            with self.subTest(cleanupPeriodDays=days):
+                settings.write_text(json.dumps({"cleanupPeriodDays": days}), encoding="utf-8")
+                status, body = self.get_json("/api/sessions")
+                self.assertEqual(status, 200)
+                copy = next(s for s in body["sessions"] if s["title"] == "doomed prompt")
+                self.assertTrue(copy["mica"]["copy"])
+                self.assertEqual(copy["mica"]["state"], "deleted")
+                self.assertEqual(copy["mica"]["flags"], ["deleted"])
+                status, comparison = self.get_json("/api/mica-compare?file=" + quote(copy["file"]))
+                self.assertEqual(status, 200)
+                self.assertEqual(comparison["state"], "deleted")
+                self.assertEqual(comparison["flags"], ["deleted"])
+
+    def test_session_list_reports_recording_settings_independently_of_mica(self):
+        settings = self.projects.parent / "settings.json"
+        config = self.codex_sessions.parent / "config.toml"
+        with mock.patch.object(server.codex, "CODEX_HOME", self.codex_sessions.parent):
+            status, body = self.get_json("/api/sessions")
+            self.assertEqual(status, 200)
+            self.assertEqual({i["setting"] for i in body["setup"]["issues"]},
+                             {"cleanupPeriodDays", "showThinkingSummaries", "model_reasoning_summary"})
+            settings.write_text(json.dumps({"cleanupPeriodDays": 10000, "showThinkingSummaries": True}))
+            config.write_text('model_reasoning_summary = "detailed"\n')
+            server.configure_mica(self.store_dir, enabled=False)
+            status, body = self.get_json("/api/sessions")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["setup"]["issues"], [])
+            self.assertEqual(body["mica"], {"enabled": False})
 
     def test_compare_endpoint(self):
         _s, verified = self.get_json("/api/mica-compare?file=" + quote(str(self.live)))
