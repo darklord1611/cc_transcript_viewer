@@ -15,12 +15,18 @@ unified session list, full-text search, viewer-owned custom names, and
 summary-cache persistence. Bundling a session into a shareable single-file
 HTML export lives in export_html.py.
 
+Optional Mica: when the Mica daemon is capturing transcripts (see mica/),
+the viewer reads its store (never writes it) to flag transcripts
+that were truncated, rewritten, or deleted after capture, and to list captured
+copies of transcripts that no longer exist on disk.
+
 Usage:
     python server.py [--port 3132] [--host 127.0.0.1]
                      [--projects-dir PATH] [--codex-home PATH]
                      [--cursor-db PATH] [--cursor-projects-dir PATH]
                      [--cursor-chats-dir PATH] [--opencode-db PATH]
                      [--custom-names-file PATH]
+                     [--mica PATH | --no-mica]
 """
 
 from __future__ import annotations
@@ -42,6 +48,7 @@ import common
 import cursor_parser as cursor
 import export_html
 import opencode_parser as opencode
+from mica import store as micastore
 
 STATIC_DIR = export_html.STATIC_DIR
 
@@ -82,6 +89,12 @@ HOST_CHECK = True
 
 # Set by main() so handlers can reach it.
 CUSTOM_NAMES_FILE = DEFAULT_CUSTOM_NAMES_FILE
+# Read-only view of Mica, or None when the feature is off (the
+# default unless a store exists at micastore.DEFAULT_STORE_DIR or --mica).
+MICA: micastore.StoreReader | None = None
+
+# Full-session parsers for Mica's copies, by the parser name the store records.
+MICA_PARSERS = {"claude": claude, "codex": codex}
 CACHE_FILE = Path.home() / ".cache" / "transcript_viewer" / "summaries.json"
 
 # File types that macOS may execute or install when opened. Local-file links
@@ -240,6 +253,7 @@ def list_sessions() -> list[dict]:
         except Exception:  # noqa: BLE001 — one broken source must not hide the rest
             pass
 
+    _apply_mica(out)
     save_summary_caches()
 
     for session in out:
@@ -268,6 +282,83 @@ def list_sessions() -> list[dict]:
         grouped.append(s)
         grouped.extend(subs_by_parent.get(s["file"], []))
     return grouped
+
+
+# ---------------------------------------------------------------------------
+# Mica (optional, read-only)
+# ---------------------------------------------------------------------------
+def _claude_cleanup_days() -> int:
+    return micastore.claude_cleanup_days(claude.PROJECTS_DIR.parent / "settings.json")
+
+
+def _apply_mica(sessions: list) -> None:
+    """Attach each live session's mica state, and add a row for every
+    captured transcript whose live file is gone (read from Mica's copy)."""
+    reader = MICA
+    if reader is None:
+        return
+    try:
+        reader.index()
+        cleanup_days = _claude_cleanup_days()
+        live_keys = set()
+        for s in sessions:
+            path = s.get("file") or ""
+            if not path or path.startswith(SYNTHETIC_SCHEMES):
+                continue
+            key = reader.key_for_path(path)
+            if key:
+                s["mica"] = reader.badge(key, cleanup_days)
+                live_keys.add(key)
+        for key, entry in reader.deleted_entries():
+            if key in live_keys:
+                continue
+            parser = MICA_PARSERS.get(entry.get("parser"))
+            record = reader.record(key)
+            gen = reader.best_generation(record) if record else None
+            gen_path = reader.generation_path(key, gen) if gen else None
+            if parser is None or gen_path is None or not gen_path.is_file():
+                continue
+            try:
+                summary = dict(parser.session_summary(gen_path))
+            except (OSError, ValueError):
+                continue
+            summary["mica"] = dict(reader.badge(key, cleanup_days), copy=True, generation=gen["id"])
+            sessions.append(summary)
+    except Exception:  # noqa: BLE001 - the store is optional; never break the list
+        return
+
+
+def mica_status() -> dict:
+    if MICA is None:
+        return {"enabled": False}
+    try:
+        return MICA.status()
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": True, "running": False, "error": str(e)}
+
+
+def mica_compare(file_id: str) -> dict:
+    """How a session's live transcript compares with its captured copy.
+
+    ``file_id`` may be a live transcript path or a store copy's path; either
+    way the comparison is between the live file (if any) and the capture.
+    """
+    if MICA is None:
+        return {"state": "disabled"}
+    if file_id.startswith(SYNTHETIC_SCHEMES):
+        return {"state": "unsupported"}
+    target = resolve_transcript_file(file_id)
+    located = MICA.locate(target)
+    if located:
+        key, gen, record = located
+        live = record.get("path") if record.get("status") == "active" else None
+        result = MICA.compare(key, live, _claude_cleanup_days())
+        result["viewing_generation"] = gen.get("id")
+        return result
+    key = MICA.key_for_path(str(target))
+    if key is None:
+        return {"state": "untracked"}
+    return MICA.compare(key, target, _claude_cleanup_days())
 
 
 def _recency(s: dict) -> float:
@@ -299,6 +390,10 @@ def _under(target: Path, root: Path) -> bool:
 def _path_parser(target: Path):
     """The parse function that owns a real transcript path, or None if the
     path lies outside every allowed transcript root."""
+    if MICA is not None and _under(target, MICA.files_dir):
+        located = MICA.locate(target)
+        parser = MICA_PARSERS.get(located[2].get("parser")) if located else None
+        return parser.parse_session if parser else None
     if _under(target, claude.PROJECTS_DIR):
         return claude.parse_session
     if _under(target, codex.SESSIONS_DIR) or (
@@ -335,7 +430,22 @@ def load_session(file_id: str) -> dict | None:
     if not target.exists():
         return None
     data = parse_session(target)
-    return _apply_custom_name(data) if data is not None else None
+    if data is None:
+        return None
+    located = MICA.locate(target) if MICA is not None else None
+    if located:
+        key, gen, record = located
+        data["mica_copy"] = {
+            "key": key,
+            "generation": gen.get("id"),
+            "reason": gen.get("reason"),
+            "started": gen.get("started"),
+            "closed": gen.get("closed"),
+            "close_reason": gen.get("close_reason"),
+            "original_path": record.get("path"),
+            "live": record.get("status") == "active",
+        }
+    return _apply_custom_name(data)
 
 
 def resolve_transcript_file(file_id: str) -> Path:
@@ -758,7 +868,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/sessions":
             try:
-                self._send_json({"sessions": list_sessions()})
+                self._send_json({"sessions": list_sessions(), "mica": mica_status()})
             except Exception as e:  # noqa: BLE001
                 self._send_json({"error": str(e)}, status=500)
             return
@@ -781,6 +891,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"supported": False})
             else:
                 self._send_json({"supported": True, "mtime": mtime})
+            return
+
+        if route == "/api/mica-compare":
+            file_arg = self._session_file_arg(parsed)
+            if file_arg is None:
+                return
+            try:
+                self._send_json(mica_compare(file_arg))
+            except FileNotFoundError:
+                self._send_json({"error": "not found"}, status=404)
+            except PermissionError:
+                self._send_json({"error": "forbidden"}, status=403)
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, status=500)
             return
 
         if route == "/api/search":
@@ -913,6 +1037,17 @@ class Handler(BaseHTTPRequestHandler):
         })
 
 
+def configure_mica(path, enabled: bool = True) -> None:
+    """Turn the read-only mica view on (when a store exists at ``path``) or off."""
+    global MICA
+    MICA = None
+    if not enabled or path is None:
+        return
+    reader = micastore.StoreReader(path)
+    if reader.available():
+        MICA = reader
+
+
 def main():
     global CUSTOM_NAMES_FILE, HOST_CHECK
     ap = argparse.ArgumentParser(description=__doc__)
@@ -950,6 +1085,13 @@ def main():
         default=opencode.DEFAULT_DB_PATH,
         help="opencode.db (or the opencode data dir holding it)",
     )
+    ap.add_argument(
+        "--mica",
+        type=Path,
+        default=micastore.DEFAULT_STORE_DIR,
+        help="Mica to check transcripts against (used when it exists)",
+    )
+    ap.add_argument("--no-mica", action="store_true", help="ignore any Mica")
     args = ap.parse_args()
 
     CUSTOM_NAMES_FILE = args.custom_names_file.expanduser()
@@ -961,6 +1103,7 @@ def main():
         chats_dir=args.cursor_chats_dir,
     )
     opencode.configure(args.opencode_db)
+    configure_mica(args.mica.expanduser(), enabled=not args.no_mica)
     # Enforce the Host allowlist only on the safe loopback default; if the user
     # deliberately binds elsewhere for LAN access, step aside so it still works.
     HOST_CHECK = args.host in LOOPBACK_HOSTS
@@ -974,6 +1117,8 @@ def main():
     print(f"  cursor projects: {cursor.PROJECTS_DIR}")
     print(f"  cursor chats:    {cursor.CHATS_DIR}")
     print(f"  opencode db:     {opencode.DB_PATH}")
+    if MICA is not None:
+        print(f"  Mica:     {MICA.root}")
     print(f"  serving at:      {url}")
     print("  (Ctrl-C to stop)")
     try:

@@ -252,6 +252,9 @@ This app reads your private transcripts, so it's built to keep them on your mach
   already referenced (image-typed only, as with `/api/local-image`). Nothing is uploaded — the file
   lands in your downloads folder. But a saved transcript *is* the whole session in one shareable
   file, so sharing one is on you: read it before you send it.
+- **Mica is read-only to the viewer.** When the optional [Mica](#optional-tamper-resistant-backups-mica)
+  is installed, the viewer reads its captures and flags; it never writes to it, and serves only
+  files Mica's own records name as captured transcripts.
 
 These guarantees are enforced by a zero-dependency test suite — run it yourself:
 
@@ -274,10 +277,70 @@ opens a standalone export with networking stubbed out and checks the rendered co
 All behavior through the real DOM. This keeps the default suite dependency-free without replacing
 the focused parser and server tests with a large screenshot suite.
 
+## Optional: tamper-resistant backups (Mica)
+
+Coding agents run as your user, so an agent in full-access mode can delete or edit the very transcript
+files this viewer reads ([Qin et al., 2026](https://arxiv.org/abs/2609.30266) show frontier agents
+doing exactly that when it raises their reward). **Mica** is an optional companion daemon
+that makes those edits visible:
+
+- It runs as a separate, hidden system user (`_mica`) and polls `~/.claude/projects`,
+  `~/.codex/sessions`, and `~/.codex/archived_sessions` about once a second, copying every append into
+  `/Library/Mica`. Only `_mica` (or root) can write there; you and your agents can read.
+- Captured bytes are never rewritten. If a live transcript is truncated, rewritten, replaced, or
+  deleted, the daemon records a timestamped event and keeps the earlier capture intact, starting a new
+  capture from the file's new contents. Each capture is hash-chained (`python3 -m mica verify`).
+- Branches and forks are not flagged: Claude Code appends rewinds/edits to the same file, and a fork
+  or sub-agent is a new file. Codex archiving a rollout is recognized as a move. Deletions that
+  Claude Code's own retention cleanup explains (older than `cleanupPeriodDays`) show as "archived".
+
+In the viewer, flagged sessions carry a red tag (**truncated**, **rewritten**, **replaced**,
+**deleted**, **recreated**), the sidebar shows the daemon's status with a "⚠ N flagged" filter, and each
+transcript gets a banner comparing it with its capture, with links to open every earlier capture.
+Transcripts that were deleted from disk stay listed and readable from the store. Without Mica
+installed, none of this appears.
+
+**Install** (macOS, once; afterwards launchd starts it at every boot with no password). Run from this
+repo's folder, so Python finds the `mica` package:
+
+```bash
+cd cc_transcript_viewer
+sudo /usr/bin/python3 -m mica install --dry-run   # print every step first
+sudo /usr/bin/python3 -m mica install
+python3 -m mica status                            # running? how many captured / flagged?
+python3 -m mica flagged                           # every tamper event, per transcript
+sudo /usr/bin/python3 -m mica uninstall           # keeps the captures unless --delete-store
+```
+
+Install creates the `_mica` user, copies the daemon to `/usr/local/libexec/mica` (owned by
+root), and grants read-only ACL entries (`ls -le` shows them) on the transcript folders plus
+pass-through "search" on the folders above them. It uses Apple's `/usr/bin/python3` with `-I`, and
+refuses any interpreter or install location an agent could modify. Review `git diff` before running it
+with sudo: you're running this repo's code as root.
+
+**What it does and doesn't protect.** It protects everything captured *before* an agent acts: an agent
+without your sudo password can't alter or delete the store, stop the daemon, or edit its code. Keep it
+that way (no `NOPASSWD` sudo; be wary of an agent asking you to run a `sudo` command). It can't:
+
+- catch content written and erased between two polls (~1 s);
+- make spoofed tool output honest (if an agent rigs its shell, the transcript faithfully records fake
+  results);
+- keep capturing after an agent removes the ACL entries (earlier captures stay safe, and the viewer
+  shows the daemon's access problem);
+- see sessions from before it was installed, or Cursor/opencode sessions (SQLite stores, not
+  append-only files).
+
+A deep edit far from the end of a large file is always preserved (the original bytes are already
+captured) but may be reported up to a minute later, when the periodic full comparison runs.
+
 Mica refuses symlinked transcript files and folders, including folders redirected after capture
 starts or while the daemon is stopped. It records lost access and keeps earlier captures; restoring
 the real folder lets capture resume. This prevents symlink redirection, but an agent can still append
 fabricated messages directly: matching a capture verifies the saved bytes, not who wrote them.
+
+`python3 -m mica daemon --store DIR` runs the same capture loop as you, for trying it out; it
+offers no protection from agents. `python server.py --mica DIR` points the viewer at any Mica store, and
+`--no-mica` turns the feature off.
 
 ## Notes on Codex transcripts
 
@@ -390,7 +453,7 @@ reported.
 
 | File | Role |
 |------|------|
-| `server.py` | The unified stdlib HTTP layer plus everything that spans sources: merges the parsers' session lists into one time-sorted sidebar list, dispatches `/api/session` to the right parser by transcript root / `cursordb:`/`cursorcli:`/`opencode:` scheme, runs full-text search, owns custom names and summary-cache persistence, and serves the JSON API (`/api/sessions`, `/api/session?file=...`, `/api/session-state?file=...`, `/api/session-name`, `/api/search?q=...`, `/api/local-image`, `/api/export?file=...`, `/api/open-local`, `/api/reveal-transcript`) plus the static frontend. `/api/session` only serves files under the allowed roots; `/api/session-name` only updates the viewer-owned names file; `/api/local-image` serves only image-typed files; and a `Host`-header allowlist guards the loopback server against DNS rebinding. |
+| `server.py` | The unified stdlib HTTP layer plus everything that spans sources: merges the parsers' session lists into one time-sorted sidebar list, dispatches `/api/session` to the right parser by transcript root / `cursordb:`/`cursorcli:`/`opencode:` scheme, runs full-text search, owns custom names and summary-cache persistence, and serves the JSON API (`/api/sessions`, `/api/session?file=...`, `/api/mica-compare?file=...`, `/api/session-state?file=...`, `/api/session-name`, `/api/search?q=...`, `/api/local-image`, `/api/export?file=...`, `/api/open-local`, `/api/reveal-transcript`) plus the static frontend. `/api/session` only serves files under the allowed roots; `/api/session-name` only updates the viewer-owned names file; `/api/local-image` serves only image-typed files; and a `Host`-header allowlist guards the loopback server against DNS rebinding. |
 | `claude_parser.py` | Claude Code parsing library (imported by `server.py`): parses session JSONL into a clean event stream (pairing tool results to calls), detects system-injected "user" records, folds rewound/edited branches into collapsible markers, labels sub-agents from their spawning `Task`/`Agent` calls, and builds sidebar summaries (cold scans use a process pool). Call `configure(projects_dir)` to point it elsewhere. |
 | `codex_parser.py` | Codex parsing library: parses rollout JSONL, reads `state_5.sqlite` metadata, pairs tool calls with outputs, unpacks orchestration-style `exec` calls, correlates local and embedded prompt images, consolidates per-turn bookkeeping, recognizes guardian/sub-agent relationships, and renders `apply_patch` diffs. Call `configure(codex_home)` to point it elsewhere. |
 | `cursor_parser.py` | Cursor parsing library: reads IDE `state.vscdb`; reads CLI `~/.cursor/chats/.../store.db` (with JSONL fallback under `agent-transcripts`); normalizes tool names/inputs; reconstructs IDE `edit_file` diffs; decodes grep/glob results out of Cursor's binary protobuf tool records (`toolCallBinary`) since newer Cursor versions no longer store them as JSON; emits Claude-shaped events. IDE uses `cursordb:<id>`; CLI store uses `cursorcli:<id>`. Call `configure(db_path, projects_dir=…, chats_dir=…)` to retarget. |
@@ -400,6 +463,7 @@ reported.
 | `codex_export/opencode_to_codex.py` | Exports opencode sessions as Codex rollout JSONL, carrying the provider's encrypted reasoning (`reasoning.encrypted` → `encrypted_content`) and splitting opencode's fused tool record into Codex's separate `function_call` / `function_call_output`. Records the provider's reasoning `format` so a non-OpenAI blob isn't mistaken for a replayable one. |
 | `codex_export/codex_rollout.py` | The parts of writing a Codex rollout that aren't specific to any source — record shape, `rollout-<time>-<id>.jsonl` naming, dated output layout — shared by both exporters so they can't drift. |
 | `export_html.py` | Bundles one parsed session into a self-contained HTML file for `/api/export`: inlines `static/style.css` and `static/app.js` into `static/index.html`, embeds the session as a JSON literal, and re-embeds locally-referenced images as `data:` URIs under a per-image and whole-file size budget. Deliberately has no renderer of its own — the saved page runs the same `app.js`, which detects the embedded payload and switches to standalone mode. |
+| `mica/` | The optional [Mica](#optional-tamper-resistant-backups-mica): `capture.py` (the polling daemon that copies appends into append-only, hash-chained generations and records tamper events), `store.py` (the on-disk format and the read-only `StoreReader` the viewer uses to badge sessions, list deleted ones, and compare a live file with its capture), `install.py` (macOS `_mica` user, root-owned install, ACLs, LaunchDaemon), and `__main__.py` (`python3 -m mica daemon/status/flagged/verify/install/uninstall`). Standard library only, Python 3.9-compatible so it runs on Apple's root-owned interpreter. |
 | `common.py` | Everything the four parsers share: JSONL iteration, JSON/SQLite access, title truncation, timestamp conversion, the sidebar-summary shape (`make_summary`), and the thread-safe fingerprint-keyed `SummaryCache` (plus its `cached_summary` wrapper) all of them use. |
 | `event_schema.py` | The written-down (and machine-checked) event contract between the parsers and the frontend: every event kind, both message shapes, and validators the test suite runs over every parser's output. |
 | `static/index.html`, `static/style.css`, `static/app.js` | The single frontend (vanilla JS, no build step). `app.js` dispatches on event kind and renders the Claude Code / Cursor / opencode (block-based) and Codex (flat) shapes, and runs the always-on live-refresh poll loop. When `window.__TRANSCRIPT_EXPORT__` is present (a saved single-file transcript) it renders that session directly and disables everything that needs the server. CDN assets (marked, DOMPurify, KaTeX) are version-pinned with SRI integrity hashes. |
@@ -412,6 +476,7 @@ reported.
 | `tests/test_event_schema.py` | Conformance tests: every parser's summaries and full parses must satisfy `event_schema.py`, and `app.js` must dispatch on every declared kind. |
 | `tests/test_golden_transcripts.py`, `tests/fixtures/` | Regression tests over checked-in, fictional transcript files whose field shapes were compared with current local stores. The fixture README records the sanitization and review rules. |
 | `tests/test_summary_cache.py`, `tests/test_common.py` | Unit tests for the shared layer: summary-cache round-trip persistence, fingerprint invalidation and dirty-flag races, plus the small helpers in `common.py`. |
+| `tests/test_mica.py` | Mica tests with a fake clock: appends, truncation, emptied files, near-end and deep rewrites, atomic replacements, deletion vs. retention cleanup, delete-then-recreate, Codex archive moves, forks and in-file branches (not flagged), offline changes, lost access (a gap, not a deletion), symlinks, crash recovery, hash-chain verification, the viewer's badges/copies/compare endpoint (and that it never writes to the store), and the installer's plan. |
 | `tests/fixture_builders.py` | Shared fixture builders that write temporary minimal-but-valid transcripts and databases for each source. |
 
 ### Transcript format notes

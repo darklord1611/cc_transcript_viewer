@@ -515,7 +515,7 @@ class SecurityTest(unittest.TestCase):
         # loopback client, so they're excluded.)
         modules = sorted(
             p
-            for pattern in ("*.py", "codex_export/*.py")
+            for pattern in ("*.py", "codex_export/*.py", "mica/*.py")
             for p in Path(".").glob(pattern)
             if not p.name.startswith("test_")
         )

@@ -335,6 +335,9 @@ let CURRENT_FILE = null;
 let CURRENT_DATA = null;
 let CURRENT_AGENT = "claude";
 let AGENT_FILTER = "all";
+let MICA_STATUS = { enabled: false }; // mica heartbeat, from /api/sessions
+let FLAGGED_ONLY = false;             // sidebar shows only mica-flagged sessions
+let MICA_COMPARE = null;             // { file, sig, result } of the open transcript
 // ---------- live auto-refresh (always on) ----------
 const SIDEBAR_POLL_MS = 1000;    // heavier scan across every transcript source
 const TRANSCRIPT_POLL_MS = 300;  // cheap stat of the open on-disk transcript
@@ -358,9 +361,11 @@ async function loadSessions() {
   const data = await res.json();
   SESSIONS = data.sessions || [];
   SESSIONS_LOADED = true;
+  MICA_STATUS = data.mica || { enabled: false };
   LAST_SIG = sessionsSignature(SESSIONS);
   buildFilters();
   renderSidebar($("#search").value || "");
+  renderMicaStatus();
 }
 
 // Cheap fingerprint of the session list: changes whenever a file is added,
@@ -368,7 +373,8 @@ async function loadSessions() {
 function sessionsSignature(list) {
   let sig = list.length + "|";
   for (const s of list) {
-    sig += s.file + ":" + (s.mtime || 0) + ":" + (s.custom_title || "") + ":" + (s.ai_title || "") + ";";
+    sig += s.file + ":" + (s.mtime || 0) + ":" + (s.custom_title || "") + ":" + (s.ai_title || "") +
+      ":" + (s.mica ? s.mica.state + "/" + s.mica.flags.join(",") : "") + ";";
   }
   return sig;
 }
@@ -586,6 +592,7 @@ function renderSidebar(query) {
   // Every filter except the agent chips, which are handled by the caller —
   // the chips display counts of what selecting them would show.
   const matchesFilters = (s) => {
+    if (FLAGGED_ONLY && !isMicaFlagged(s)) return false;
     if (SELECTED_MODELS.size && !SELECTED_MODELS.has(s.model || "")) return false;
     if (SELECTED_DIRS.size && !SELECTED_DIRS.has(s.cwd || "")) return false;
     if (DATE_FILTER.from || DATE_FILTER.to) {
@@ -690,6 +697,7 @@ function renderSidebar(query) {
         "div",
         { class: "session-toprow" },
         ...agentTags(s),
+        micaTag(s),
         el("span", { class: "session-title" }, s.title)
       ),
       s.cwd ? el("div", { class: "session-cwd", title: s.cwd }, shortPath(s.cwd)) : null,
@@ -723,7 +731,7 @@ function renderSidebar(query) {
   if (!list.children.length) {
     // "No transcripts found" is only true when nothing is filtered out —
     // an active chip/model/directory/date filter empties the list too.
-    const filtered = AGENT_FILTER !== "all" || SELECTED_MODELS.size ||
+    const filtered = AGENT_FILTER !== "all" || FLAGGED_ONLY || SELECTED_MODELS.size ||
       SELECTED_DIRS.size || DATE_FILTER.from || DATE_FILTER.to;
     const message = q || filtered
       ? "No matching sessions."
@@ -1105,6 +1113,7 @@ function renderTranscript(data, opts = {}) {
       el("button", { class: "btn", onclick: scrollToEnd }, "⤓ Jump to end")
     )
   );
+  if (!STANDALONE && MICA_STATUS.enabled) header.append(micaBanner(data, transcriptFile));
   t.append(header);
 
   const events = data.events || [];
@@ -2224,6 +2233,246 @@ async function refreshSidebar() {
   markActive();
 }
 
+// ---------- Mica (optional; only shown when a store is configured) ----------
+const MICA_FLAG_LABELS = {
+  truncated: "truncated",
+  rewritten: "rewritten",
+  replaced: "replaced",
+  deleted: "deleted",
+  recreated: "recreated after deletion",
+};
+
+function isMicaFlagged(s) {
+  const vt = s.mica;
+  return !!vt && (vt.flags.length > 0 || vt.state === "deleted");
+}
+
+function micaTag(s) {
+  const vt = s.mica;
+  if (!vt) return null;
+  if (vt.copy) {
+    return vt.state === "expired"
+      ? el("span", { class: "mica-tag mica-info", title: "Removed by Claude Code's retention cleanup; shown from Mica's capture" }, "archived")
+      : el("span", { class: "mica-tag mica-bad", title: "The live transcript was deleted; shown from Mica's capture" }, "deleted");
+  }
+  if (!vt.flags.length) return null;
+  const labels = vt.flags.map((f) => MICA_FLAG_LABELS[f] || f);
+  return el("span", { class: "mica-tag mica-bad", title: "Changed after the store captured it: " + labels.join(", ") }, "⚠ " + vt.flags[0]);
+}
+
+function fmtBytes(n) {
+  if (n == null) return "?";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1024 / 1024).toFixed(1) + " MB";
+}
+
+let MICA_STATUS_KEY = "";
+function renderMicaStatus() {
+  const box = $("#mica-status");
+  if (!box) return;
+  const v = MICA_STATUS;
+  if (!v || !v.enabled) {
+    box.hidden = true;
+    return;
+  }
+  const flagged = SESSIONS.filter(isMicaFlagged).length;
+  if (!flagged && FLAGGED_ONLY) {
+    FLAGGED_ONLY = false;
+    renderSidebar($("#search").value);
+  }
+  const key = [v.running, v.n_files, flagged, FLAGGED_ONLY].join("|");
+  const age = v.heartbeat_age == null ? null : Math.round(v.heartbeat_age);
+  box.title = v.running
+    ? `Mica at ${v.root} (last heartbeat ${age}s ago)`
+    : `No heartbeat from Mica${age == null ? "" : " for " + age + "s"}: transcripts are not being captured right now.`;
+  if (key === MICA_STATUS_KEY) return;
+  MICA_STATUS_KEY = key;
+  box.hidden = false;
+  box.className = "mica-status" + (v.running ? "" : " mica-down");
+  box.replaceChildren(
+    el("span", { class: "mica-dot", "aria-hidden": "true" }),
+    el("span", {}, v.running ? "Mica capturing" : "Mica not running"),
+    el("span", { class: "mica-count" }, `${v.n_files} captured`),
+    flagged
+      ? el("button", {
+          class: "mica-flag-btn" + (FLAGGED_ONLY ? " on" : ""),
+          type: "button",
+          title: FLAGGED_ONLY ? "Show every session" : "Show only sessions the store flagged",
+          onclick: () => {
+            FLAGGED_ONLY = !FLAGGED_ONLY;
+            renderSidebar($("#search").value);
+            markActive();
+            renderMicaStatus();
+          },
+        }, FLAGGED_ONLY ? "Show all" : `⚠ ${flagged} flagged`)
+      : null
+  );
+}
+
+function micaSig(file) {
+  const s = SESSIONS.find((x) => x.file === file);
+  return JSON.stringify((s && s.mica) || null);
+}
+
+// The banner fills in once /api/mica-compare answers. A live refresh of the
+// same transcript reuses the last answer instead of re-comparing the whole
+// file on every append; a change in Mica's flags for the session (seen
+// by the sidebar poll) triggers a fresh comparison.
+function micaBanner(data, file) {
+  const box = el("div", { class: "mica-banner", hidden: "" });
+  const sig = micaSig(file);
+  if (MICA_COMPARE && MICA_COMPARE.file === file && MICA_COMPARE.sig === sig) {
+    fillMicaBanner(box, MICA_COMPARE.result, data);
+    return box;
+  }
+  fetch("/api/mica-compare?file=" + encodeURIComponent(file))
+    .then((r) => r.json())
+    .then((result) => {
+      if (result.error) return;
+      MICA_COMPARE = { file, sig, result };
+      if (CURRENT_FILE === file) fillMicaBanner(box, result, data);
+    })
+    .catch(() => {});
+  return box;
+}
+
+function refreshMicaBanner() {
+  const old = $("#transcript .mica-banner");
+  if (!old || !CURRENT_DATA) return;
+  MICA_COMPARE = null;
+  old.replaceWith(micaBanner(CURRENT_DATA, CURRENT_FILE));
+}
+
+function micaOpenLink(file, label, title) {
+  return el("a", {
+    class: "parent-link", href: "#", title: title || file,
+    onclick: (e) => { e.preventDefault(); openSession(file); },
+  }, label);
+}
+
+function describeMicaEvent(ev) {
+  const d = ev.detail || {};
+  const label = MICA_FLAG_LABELS[ev.type] || ev.type;
+  let extra = "";
+  if (d.captured_size != null && d.live_size != null) {
+    extra = ` (${fmtBytes(d.captured_size)} captured → ${fmtBytes(d.live_size)} on disk)`;
+  } else if (d.captured_size != null) {
+    extra = ` (${fmtBytes(d.captured_size)} captured)`;
+  }
+  if (d.while_offline) extra += " — while the store daemon was not running";
+  return `${fmtTime(ev.t)} — ${label}${extra}`;
+}
+
+function fillMicaBanner(box, r, data) {
+  const copy = data.mica_copy;
+  const flags = r.flags || [];
+  const gens = r.generations || [];
+  const line = (...kids) => el("div", { class: "mica-line" }, ...kids);
+  const kids = [];
+  let tone = flags.length ? "bad" : "ok";
+
+  const deletedEv = (r.events || []).filter((ev) => ev.type === "deleted").pop();
+  switch (r.state) {
+    case "verified":
+    case "ahead":
+      if (!flags.length) {
+        kids.push(line("🔒 Matches Mica's capture" + (r.state === "ahead" ? " (the newest lines are still being copied)." : ".")));
+      } else if (flags.length === 1 && flags[0] === "recreated") {
+        kids.push(line("⚠ A transcript at this path was deleted, and this file was started afresh afterwards."));
+      } else {
+        kids.push(line("⚠ Mica recorded changes to this transcript after capturing it. The live file matches " +
+          "the latest capture; the content from before the change is preserved in the earlier capture."));
+      }
+      break;
+    case "modified": {
+      tone = "bad";
+      const d = r.diff || {};
+      kids.push(line(
+        `⚠ The live transcript no longer matches Mica's capture: ${d.missing_count} captured line(s) are missing from it and ` +
+        `${d.extra_count} line(s) in it were never captured (first difference at line ${d.first_diff_line}).`
+      ));
+      break;
+    }
+    case "deleted":
+      tone = "bad";
+      kids.push(line(`🗑 The live transcript was deleted${deletedEv ? " at " + fmtTime(deletedEv.t) : ""}. ` +
+        (copy ? "What you're reading is Mica's copy." : "")));
+      break;
+    case "expired":
+      tone = "info";
+      kids.push(line(`🗄 Claude Code's retention cleanup removed this transcript${deletedEv ? " at " + fmtTime(deletedEv.t) : ""}; ` +
+        "Mica kept a copy."));
+      break;
+    case "untracked":
+      tone = "muted";
+      kids.push(line("Not captured by Mica (yet)."));
+      break;
+    default:
+      return;
+  }
+
+  if (copy) {
+    const gen = gens.find((g) => g.id === copy.generation) || {};
+    kids.push(el("div", { class: "mica-line mica-copy-line", title: copy.original_path },
+      `You're reading Mica capture ${copy.generation} (${fmtBytes(gen.size)}) of ${shortPath(copy.original_path)}` +
+        (copy.close_reason ? `, frozen when the live file was ${copy.close_reason}` : "") + ". ",
+      copy.live && r.path ? micaOpenLink(r.path, "Open the live transcript") : null
+    ));
+  } else if (flags.length && gens.length > 1 && gens[0].file) {
+    kids.push(line(micaOpenLink(gens[0].file, `Open the original capture (${gens[0].id}, ${fmtBytes(gens[0].size)})`)));
+  }
+
+  if (r.recreated_from_file) {
+    kids.push(line("The file was deleted and then recreated at the same path. ",
+      micaOpenLink(r.recreated_from_file, "Open the content captured before the deletion")));
+  }
+
+  const tamper = (r.events || []).filter((ev) => MICA_FLAG_LABELS[ev.type]);
+  if (tamper.length) {
+    kids.push(el("div", { class: "mica-sub" }, "Recorded changes:"),
+      el("ul", { class: "mica-list" }, ...tamper.map((ev) => el("li", {}, describeMicaEvent(ev)))));
+  }
+  if (gens.length > 1 || copy) {
+    kids.push(el("div", { class: "mica-sub" }, "Captures:"),
+      el("ul", { class: "mica-list" }, ...gens.map((g) => el("li", {},
+        g.file && !(copy && g.id === copy.generation)
+          ? micaOpenLink(g.file, g.id, "Open this capture")
+          : el("strong", {}, g.id),
+        ` — ${fmtBytes(g.size)}, started ${fmtTime(g.started)} (${g.reason})` +
+          (g.closed ? `, closed ${fmtTime(g.closed)} (${g.close_reason})` : ", current")
+      ))));
+  }
+  if (r.state === "modified" && r.diff) {
+    const d = r.diff;
+    const cur = gens.find((g) => g.id === r.compared_generation);
+    if (cur && cur.file) kids.push(line(micaOpenLink(cur.file, "Open the captured version (" + cur.id + ")")));
+    const block = el("div", { class: "mica-diff collapsed" });
+    const sample = (title, items) => items.length ? [
+      el("div", { class: "mica-sub" }, title),
+      ...items.map((it) => el("div", { class: "mica-diff-line" },
+        el("span", { class: "mica-diff-no" }, "line " + it.line),
+        [it.type, it.timestamp].filter(Boolean).join(" · ") + (it.type || it.timestamp ? " — " : ""),
+        el("code", {}, it.preview))),
+    ] : [];
+    block.append(
+      toggleHead(block, "mica-diff-head", "Differing lines"),
+      el("div", { class: "mica-diff-body" },
+        ...sample(`Captured but missing from the live file (${d.missing_count}):`, d.missing || []),
+        ...sample(`In the live file but never captured (${d.extra_count}):`, d.extra || []))
+    );
+    kids.push(block);
+  }
+  if (r.preexisting && (flags.length || r.state === "modified")) {
+    kids.push(el("div", { class: "mica-note" },
+      `Capture of this file began ${fmtTime(r.first_seen)}, when Mica was installed; changes made before then can't be checked.`));
+  }
+
+  box.className = "mica-banner mica-" + tone;
+  box.hidden = false;
+  box.replaceChildren(...kids);
+}
+
 // ---------- live polling (always on) ----------
 // Real transcript files get a fast, tiny stat request. The full session list
 // remains on a slower loop for sidebar changes and synthetic Cursor sessions.
@@ -2255,7 +2504,9 @@ async function pollSidebar() {
     let next;
     try {
       const res = await fetch("/api/sessions");
-      next = (await res.json()).sessions || [];
+      const body = await res.json();
+      next = body.sessions || [];
+      MICA_STATUS = body.mica || { enabled: false };
     } catch (e) { return; } // server momentarily unreachable; retry next tick
     const sig = sessionsSignature(next);
     if (sig !== LAST_SIG) {
@@ -2265,7 +2516,11 @@ async function pollSidebar() {
       // Model/Directory dropdowns without a page reload.
       if (filterOptionsSignature() !== FILTER_OPTIONS_SIG) buildFilters();
       await refreshSidebar();
+      // The store flagged (or cleared) the open transcript: redo its banner.
+      if (CURRENT_FILE && MICA_COMPARE && MICA_COMPARE.file === CURRENT_FILE &&
+          MICA_COMPARE.sig !== micaSig(CURRENT_FILE)) refreshMicaBanner();
     }
+    renderMicaStatus();
     // Synthetic Cursor sessions have no standalone file to stat, so retain
     // mtime detection here. Title changes for every source also flow here.
     if (CURRENT_FILE) {

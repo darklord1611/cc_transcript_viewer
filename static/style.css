@@ -887,3 +887,46 @@ pre.payload.diff { padding: 0; }
 .diff-hunk { color: var(--user); background: rgba(31,111,235,.07); }
 .diff-file { color: var(--muted); font-weight: 600; background: var(--bg-elev); }
 .diff-ctx { color: var(--text); }
+
+/* Mica (optional): sidebar status line, row tags, transcript banner */
+.mica-status {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 8px; font-size: 11.5px; color: var(--muted);
+}
+.mica-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--tool); flex: none; }
+.mica-status.mica-down { color: var(--tool-err); }
+.mica-status.mica-down .mica-dot { background: var(--tool-err); }
+.mica-count { opacity: .8; }
+.mica-flag-btn {
+  margin-left: auto; font: inherit; font-size: 11px; cursor: pointer;
+  padding: 1px 8px; border-radius: 999px;
+  color: var(--tool-err); background: transparent; border: 1px solid currentColor;
+}
+.mica-flag-btn.on { color: var(--on-accent); background: var(--tool-err); border-color: var(--tool-err); }
+.mica-tag {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .05em;
+  padding: 1px 6px; border-radius: 4px; white-space: nowrap; cursor: help;
+}
+.mica-tag.mica-bad { color: var(--tool-err); background: rgba(209,36,47,.08); border: 1px solid rgba(209,36,47,.3); }
+.mica-tag.mica-info { color: var(--muted); background: var(--bg-elev); }
+.mica-banner {
+  margin: 10px 0 2px; padding: 8px 12px; border-radius: 8px; font-size: 12.5px;
+  border: 1px solid var(--border); background: var(--bg-alt);
+}
+.mica-banner.mica-ok { color: var(--tool); background: rgba(31,122,69,.06); border-color: rgba(31,122,69,.22); padding: 4px 10px; }
+.mica-banner.mica-bad { color: var(--text); background: rgba(209,36,47,.06); border-color: rgba(209,36,47,.32); }
+.mica-banner.mica-bad > .mica-line:first-child { color: var(--tool-err); font-weight: 600; }
+.mica-banner.mica-info, .mica-banner.mica-muted { color: var(--muted); }
+.mica-line + .mica-line { margin-top: 4px; }
+.mica-sub { margin-top: 8px; font-weight: 600; color: var(--muted); font-size: 11.5px; }
+.mica-list { margin: 3px 0 0; padding-left: 18px; }
+.mica-list li { margin: 1px 0; }
+.mica-copy-line { color: var(--muted); }
+.mica-note { margin-top: 8px; color: var(--muted); font-size: 11.5px; }
+.mica-diff { margin-top: 8px; }
+.mica-diff-head { cursor: pointer; font-weight: 600; font-size: 12px; display: flex; gap: 6px; align-items: center; }
+.collapsible.collapsed > .mica-diff-body { display: none; }
+.mica-diff-body { max-height: 360px; overflow: auto; margin-top: 4px; }
+.mica-diff-line { font-size: 11.5px; padding: 2px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.mica-diff-line code { font-family: var(--mono); font-size: 11px; }
+.mica-diff-no { color: var(--muted); margin-right: 6px; font-family: var(--mono); }
