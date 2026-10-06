@@ -274,6 +274,11 @@ opens a standalone export with networking stubbed out and checks the rendered co
 All behavior through the real DOM. This keeps the default suite dependency-free without replacing
 the focused parser and server tests with a large screenshot suite.
 
+Mica refuses symlinked transcript files and folders, including folders redirected after capture
+starts or while the daemon is stopped. It records lost access and keeps earlier captures; restoring
+the real folder lets capture resume. This prevents symlink redirection, but an agent can still append
+fabricated messages directly: matching a capture verifies the saved bytes, not who wrote them.
+
 ## Notes on Codex transcripts
 
 - **Reasoning summaries.** Readable summaries only exist if you set
