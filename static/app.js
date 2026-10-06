@@ -1856,6 +1856,7 @@ function renderTool(b) {
       bodyKids.push(el("div", { class: "tool-section-label" }, isErr ? "Error" : "Result"));
       if (txt) bodyKids.push(el("pre", { class: "payload truncatable" + (isErr ? " result-error" : "") }, txt));
       for (const uri of imgs) bodyKids.push(el("img", { src: uri, class: "tool-image", loading: "lazy" }));
+      for (const note of b.result.image_notes || []) bodyKids.push(el("div", { class: "attach-meta" }, note));
     }
   } else {
     bodyKids.push(el("div", { class: "tool-section-label muted" }, "No result recorded"));

@@ -679,6 +679,7 @@ def parse_session(path: Path) -> dict:
     results_by_id: dict[str, dict] = {}
     tool_uses_by_id: dict[str, dict] = {}
     skill_instructions_by_id: dict[str, str] = {}
+    tool_id_by_result_uuid: dict[str, str] = {}
     for rec in records:
         content = rec.get("message", {}).get("content")
         if not isinstance(content, list):
@@ -698,6 +699,8 @@ def parse_session(path: Path) -> dict:
                         "images": norm["images"],
                         "structured": rec.get("toolUseResult"),
                     }
+                    if rec.get("uuid"):
+                        tool_id_by_result_uuid[rec["uuid"]] = tid
     for rec in records:
         source_id = rec.get("sourceToolUseID")
         source_tool = tool_uses_by_id.get(source_id, {})
@@ -857,6 +860,15 @@ def parse_session(path: Path) -> dict:
         if t == "user":
             blocks, has_content = _content_blocks(rec.get("message", {}).get("content"))
             if not has_content:
+                continue
+            # An image tool result is followed by a meta "companion" record
+            # carrying its "[Image: original WxH, ...]" caption. It belongs to
+            # that result, not to the conversation.
+            companion_tid = tool_id_by_result_uuid.get(rec.get("parentUuid"))
+            if rec.get("isMeta") and rec.get("turnCompanion") and companion_tid:
+                results_by_id[companion_tid].setdefault("image_notes", []).append(
+                    _user_record_text(rec)
+                )
                 continue
             # Claude Code injects a selected skill's instructions as an isMeta
             # user record. It is model context, not something the user typed.
