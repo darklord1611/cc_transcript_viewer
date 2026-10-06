@@ -346,12 +346,22 @@ class ExistingServiceAccount(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "another group shares its gid"):
             install._service_user_exists(self.owner)
 
+    def test_implicit_macos_memberships_are_accepted(self):
+        # What macOS really reports for every local account (e.g. _www):
+        # everyone, localaccounts, _lpoperator, com.apple.sharepoint.group.1.
+        self.memberships.return_value = [321, 12, 61, 100, 701]
+        self.assertTrue(install._service_user_exists(self.owner))
+
     def test_other_group_members_and_supplementary_groups_are_rejected(self):
         self.group_lookup.return_value = grp.struct_group(("_mica", "*", 321, ["someone"]))
         with self.assertRaisesRegex(SystemExit, "other users are members"):
             install._service_user_exists(self.owner)
         self.group_lookup.return_value = self.group
-        self.memberships.return_value = [321, 80]
+        self.memberships.return_value = [321, 12, 80]
+        with self.assertRaisesRegex(SystemExit, "administrator group"):
+            install._service_user_exists(self.owner)
+        self.memberships.return_value = [321]
+        self.groups.return_value = [self.group, grp.struct_group(("staff", "*", 20, ["_mica"]))]
         with self.assertRaisesRegex(SystemExit, "belongs to groups besides"):
             install._service_user_exists(self.owner)
 

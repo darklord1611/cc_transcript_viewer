@@ -33,6 +33,7 @@ import json
 import os
 import secrets
 import stat as stat_mod
+import sys
 import time
 from pathlib import Path
 
@@ -114,7 +115,11 @@ def _open_directory(path, *, readable: bool = False) -> int:
     path = _source_path(path)
     # Ancestors carry only the installer's search ACL, not list/read access.
     # O_SEARCH (macOS) / O_PATH (Linux) preserves that minimal permission.
-    search = getattr(os, "O_SEARCH", getattr(os, "O_PATH", os.O_RDONLY))
+    search = getattr(os, "O_SEARCH", getattr(os, "O_PATH", None))
+    if search is None:
+        # Some Python builds (e.g. conda's) omit os.O_SEARCH on macOS. The
+        # kernel value is fixed: O_EXEC | O_DIRECTORY in <sys/fcntl.h>.
+        search = 0x40100000 if sys.platform == "darwin" else os.O_RDONLY
     flags = search | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open(path.anchor, flags)
     try:

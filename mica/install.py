@@ -39,6 +39,7 @@ from mica import capture
 from mica import store as v
 
 SERVICE_USER = "_mica"
+ADMIN_GIDS = frozenset({0, 80})  # wheel, admin
 LABEL = "local.mica"
 LIBEXEC_DIR = Path("/usr/local/libexec/mica")
 PLIST_PATH = Path("/Library/LaunchDaemons") / f"{LABEL}.plist"
@@ -218,7 +219,14 @@ def _service_user_exists(target_user=None) -> bool:
             problems.append("another account uses its primary group")
         if any(g.gr_gid == account.pw_gid and g.gr_name != SERVICE_USER for g in grp.getgrall()):
             problems.append("another group shares its gid")
-        if set(os.getgrouplist(SERVICE_USER, account.pw_gid)) != {account.pw_gid}:
+        # macOS reports every local account as a member of everyone,
+        # localaccounts, _lpoperator and the sharepoint groups (all nested
+        # from everyone/localaccounts), so a fresh account never has only its
+        # own group. Reject explicit extra memberships, and administrator
+        # groups however they are reached.
+        if set(os.getgrouplist(SERVICE_USER, account.pw_gid)) & ADMIN_GIDS:
+            problems.append("belongs to an administrator group")
+        if any(SERVICE_USER in g.gr_mem and g.gr_name != SERVICE_USER for g in grp.getgrall()):
             problems.append("belongs to groups besides its dedicated service group")
         # Password '*' alone is insufficient if a ShadowHash or other
         # authentication authority has subsequently been configured.
