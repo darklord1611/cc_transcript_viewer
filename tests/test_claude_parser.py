@@ -74,6 +74,51 @@ class BranchFoldingTests(unittest.TestCase):
         ]
         self.assertIn("kept reply", texts)
 
+    def test_rewinds_to_first_prompt_fold_sibling_roots(self):
+        records = [
+            _user("u1", None, "first", "2026-01-01T00:00:00Z"),
+            _assistant("a1", "u1", "old reply", "2026-01-01T00:00:01Z"),
+            _user("u2", None, "first", "2026-01-01T00:00:02Z"),
+            _assistant("a2", "u2", "retry reply", "2026-01-01T00:00:03Z"),
+            _user("u3", None, "edited first", "2026-01-01T00:00:04Z"),
+            _assistant("a3", "u3", "new reply", "2026-01-01T00:00:05Z"),
+        ]
+        for leaf in (None, "u3", "a3", "u2"):
+            with self.subTest(leaf=leaf):
+                data = self._parse(records + (
+                    [{"type": "last-prompt", "leafUuid": leaf}] if leaf else []
+                ))
+                events = data["events"]
+                self.assertEqual([e["kind"] for e in events],
+                                 ["branch", "user", "assistant"])
+                branch = events[0]
+                self.assertEqual(branch["count"], 4)
+                self.assertEqual(len(branch["groups"]), 2)
+                self.assertEqual(events[-1]["blocks"][0]["text"],
+                                 "retry reply" if leaf == "u2" else "new reply")
+                all_events = [e for group in branch["groups"] for e in group] + events[1:]
+                self.assertCountEqual(
+                    [e["blocks"][0]["text"] for e in all_events],
+                    ["first", "old reply", "first", "retry reply", "edited first", "new reply"],
+                )
+                self.assertTrue(all("_uuid" not in e and "_idx" not in e for e in all_events))
+
+    def test_disconnected_history_is_not_a_root_rewind(self):
+        for disconnected in (
+            _user("u2", "missing", "orphan", "2026-01-01T00:00:02Z"),
+            {"type": "system", "uuid": "c1", "parentUuid": None,
+             "subtype": "compact_boundary", "content": "Compacted"},
+        ):
+            with self.subTest(record_type=disconnected["type"]):
+                data = self._parse([
+                    _user("u1", None, "first", "2026-01-01T00:00:00Z"),
+                    _assistant("a1", "u1", "reply", "2026-01-01T00:00:01Z"),
+                    disconnected,
+                    _assistant("a2", disconnected["uuid"], "continued", "2026-01-01T00:00:03Z"),
+                ])
+                self.assertEqual(len(data["events"]), 4)
+                self.assertNotIn("branch", [e["kind"] for e in data["events"]])
+
     def test_unplaceable_events_fall_back_to_flat_list(self):
         # A fork whose events can't all be placed on the active path must not
         # silently drop content: the parser returns the flat list instead.

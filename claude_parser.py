@@ -605,6 +605,23 @@ def _fold_branches(records: list[dict], events: list[dict], active_leaf) -> list
         node = parent_of.get(node)
     chain.reverse()  # root → leaf
 
+    # Rewinding the first prompt creates sibling roots with parentUuid=null,
+    # rather than children of a shared message. Give those prompts a virtual
+    # parent so the same folding walk includes the abandoned conversations.
+    # Missing parents and compaction boundaries can also create roots, but
+    # don't establish a rewind: leave those to the coverage fallback below.
+    roots = children.get(None, [])
+    if len(roots) > 1 and all(
+        records[first_idx[g]].get("type") == "user"
+        and "parentUuid" in records[first_idx[g]]
+        and records[first_idx[g]]["parentUuid"] is None
+        and not records[first_idx[g]].get("isMeta")
+        and not records[first_idx[g]].get("isSidechain")
+        and g[0] == "u"
+        for g in roots
+    ):
+        chain.insert(0, None)
+
     evs_by_group: dict = {}
     for e in events:
         g = group_of.get(e["_uuid"])
