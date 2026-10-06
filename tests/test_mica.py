@@ -177,6 +177,57 @@ class CaptureScenarios(CaptureTestCase):
         self.assertEqual(self.reader.badge(key)["flags"], ["truncated"])
         self.assertEqual(capture.verify_store(self.store_dir), [])
 
+    def test_compare_explains_each_change_with_readable_lines(self):
+        records = [
+            {"type": "user", "timestamp": "2026-01-01T00:00:00Z", "message": {"role": "user", "content": "hello"}},
+            {"type": "assistant", "timestamp": "2026-01-01T00:00:01Z", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "rm -rf ~/.claude/projects/x"}}]}},
+            {"type": "assistant", "timestamp": "2026-01-01T00:00:02Z", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "done, traces removed"}]}},
+        ]
+        path = self.session(records=records)
+        self.capturer.start()
+        key = self.key(path)
+        path.write_text(_line(records[0]))
+        self.tick()
+        (change,) = self.reader.compare(key, path)["changes"]
+        self.assertEqual((change["from"], change["to"], change["reason"]), ("g0000", "g0001", "truncated"))
+        self.assertEqual((change["missing_count"], change["extra_count"]), (2, 0))
+        self.assertEqual([m["line"] for m in change["missing"]], [2, 3])
+        self.assertEqual(change["missing"][0]["text"], "[Bash] rm -rf ~/.claude/projects/x")
+        self.assertEqual(change["missing"][1]["role"], "assistant")
+        self.assertEqual(change["missing"][1]["text"], "done, traces removed")
+
+    def test_every_later_tampering_is_captured_too(self):
+        path = self.session(records=[{"n": 1}, {"n": 2}])
+        self.capturer.start()
+        key = self.key(path)
+        _append(path, {"n": 3})                                # normal growth
+        self.tick()
+        path.write_text(_line({"n": 1}))                       # tamper 1: cut 2 and 3
+        self.tick()
+        _append(path, {"n": 4}, {"n": 5})                      # the session keeps going
+        self.tick()
+        path.write_text(_line({"n": 1}) + _line({"forged": 4}) + _line({"n": 5}))  # tamper 2: same size, edited
+        self.tick()
+        _append(path, {"n": 6})
+        self.tick()
+
+        rec = self.reader.record(key)
+        self.assertEqual(rec["flags"], ["truncated", "rewritten"])
+        files = [self.reader.generation_path(key, g).read_text() for g in rec["generations"]]
+        self.assertEqual(files, [
+            "".join(_line({"n": i}) for i in (1, 2, 3)),                     # before tamper 1
+            "".join(_line({"n": i}) for i in (1, 4, 5)),                     # between the two
+            _line({"n": 1}) + _line({"forged": 4}) + _line({"n": 5}) + _line({"n": 6}),  # current
+        ])
+        changes = self.reader.compare(key, path)["changes"]
+        self.assertEqual([(c["from"], c["to"], c["reason"]) for c in changes],
+                         [("g0000", "g0001", "truncated"), ("g0001", "g0002", "rewritten")])
+        self.assertEqual([m["line"] for m in changes[1]["missing"]], [2])   # {"n": 4} was replaced
+        self.assertEqual(self.reader.compare(key, path)["state"], "verified")
+        self.assertEqual(capture.verify_store(self.store_dir), [])
+
     def test_emptied_file_then_new_content(self):
         path = self.session()
         self.capturer.start()
@@ -449,6 +500,22 @@ class CaptureScenarios(CaptureTestCase):
         diff = result["diff"]
         self.assertEqual((diff["missing_count"], diff["extra_count"], diff["first_diff_line"]), (1, 0, 2))
         self.assertEqual(diff["missing"][0]["line"], 2)
+
+    def test_heartbeat_reports_cpu_and_the_reader_warns_above_two_percent(self):
+        self.session()
+        clock = {"wall": 1000.0, "cpu": 50.0}
+        with mock.patch.object(capture.time, "monotonic", side_effect=lambda: clock["wall"]), \
+                mock.patch.object(capture.time, "process_time", side_effect=lambda: clock["cpu"]):
+            self.capturer.start()
+            self.assertIsNone(v.read_json(self.store_dir / v.STATUS_FILE)["cpu_percent"])  # no full window yet
+            for cpu_per_second, warn in ((0.003, False), (0.05, True)):
+                clock["wall"] += 120
+                clock["cpu"] += 120 * cpu_per_second
+                self.tick(seconds=capture.HEARTBEAT_SECONDS)
+                with mock.patch.object(v.time, "time", return_value=self.now):
+                    status = self.reader.status()
+                self.assertAlmostEqual(status["cpu_percent"], 100 * cpu_per_second, places=2)
+                self.assertEqual(status["cpu_warn"], warn)
 
     def test_heartbeat_and_status(self):
         self.session()

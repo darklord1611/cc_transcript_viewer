@@ -82,9 +82,13 @@ def cmd_status(args) -> int:
         return 0
     age = status["heartbeat_age"]
     state = "running" if status["running"] else "NOT RUNNING"
-    print(f"mica:    {status['root']}")
+    print(f"store:    {status['root']}")
     print(f"daemon:   {state}" + (f" (last heartbeat {age:.0f}s ago)" if age is not None else ""))
     print(f"files:    {status['n_files']} captured, {status['n_flagged']} flagged")
+    cpu = status.get("cpu_percent")
+    if cpu is not None:
+        warn = "  ⚠ higher than expected" if status.get("cpu_warn") else ""
+        print(f"cpu:      {cpu:.2f}% of one core (last minute){warn}")
     for name, src in sorted(status["sources"].items()):
         note = "ok" if src.get("ok") else f"PROBLEM: {src.get('error')}"
         if src.get("ok") and src.get("error") == "missing":

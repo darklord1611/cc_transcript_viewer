@@ -29,6 +29,7 @@ already in the store either way.
 from __future__ import annotations
 
 import errno
+import functools
 import json
 import os
 import secrets
@@ -44,6 +45,7 @@ DEFAULT_COLD_SECONDS = 15.0
 DEFAULT_RESCAN_SECONDS = 300.0
 DEFAULT_VERIFY_SECONDS = 60.0
 HEARTBEAT_SECONDS = 5.0
+CPU_WINDOW_SECONDS = 60.0  # the heartbeat reports CPU use over this trailing window
 HOT_SECONDS = 300.0        # files changed this recently are statted every poll
 TAIL_WINDOW = 64 * 1024    # bytes before the captured end checked on every change
 COPY_CHUNK = 1 << 20
@@ -61,9 +63,13 @@ def _source_path(path) -> Path:
     """
     path = Path(os.path.abspath(os.path.expanduser(str(path))))
     if len(path.parts) > 1:
-        system_dir = Path(os.path.realpath(Path(path.anchor) / path.parts[1]))
-        path = system_dir.joinpath(*path.parts[2:])
+        path = _system_dir(path.anchor, path.parts[1]).joinpath(*path.parts[2:])
     return path
+
+
+@functools.lru_cache(maxsize=None)
+def _system_dir(anchor: str, first: str) -> Path:
+    return Path(os.path.realpath(Path(anchor) / first))
 
 
 class Source:
@@ -253,6 +259,9 @@ class Capturer:
         self._last_cold = 0.0
         self._last_rescan = 0.0
         self._last_heartbeat = 0.0
+        # (monotonic wall, process CPU) samples for the self-reported CPU %.
+        # Started after start() so the one-off initial capture isn't counted.
+        self._cpu_samples: list = []
         self.started_at = None
 
     # ------------------------------------------------------------------ #
@@ -296,6 +305,7 @@ class Capturer:
         self._full_scan(now, preexisting=first_run)
         self._resolve_missing(now, force=True)
         self._write_index()
+        self._cpu_samples = [(time.monotonic(), time.process_time())]
         self._heartbeat(now, force=True)
 
     def _track(self, key: str) -> None:
@@ -459,6 +469,16 @@ class Capturer:
 
     def _scan_changed_dirs(self, now: float) -> None:
         for dirpath, (mtime_ns, src) in list(self.dir_mtimes.items()):
+            # Fast path: one lstat per directory per poll. Symlink games can
+            # only make this *see* a change (a different inode/ctime can't
+            # match the recorded signature), which falls through to the
+            # strict, symlink-refusing open below.
+            try:
+                quick = os.lstat(dirpath)
+                if stat_mod.S_ISDIR(quick.st_mode) and _dir_sig(quick) == mtime_ns:
+                    continue
+            except OSError:
+                pass
             try:
                 fd = _open_directory(dirpath, readable=True)
             except OSError as exc:
@@ -638,6 +658,18 @@ class Capturer:
     # ------------------------------------------------------------------ #
     def _stat_and_process(self, key: str, now: float) -> None:
         rec = self.records[key]
+        rt = self.runtime[key]
+        due_verify = now - rt.get("last_verify", 0.0) >= self.verify_seconds and rt.get("dirty_since_verify")
+        # Fast path, as for directories: an unchanged signature needs no
+        # strict per-component open; any difference falls through to it.
+        if not due_verify:
+            try:
+                quick = os.lstat(rec["path"])
+                if stat_mod.S_ISREG(quick.st_mode) and _sig(quick) == rt.get("stat"):
+                    self.pending_missing.pop(key, None)
+                    return
+            except OSError:
+                pass
         try:
             st = _stat_nofollow(rec["path"])
         except OSError as exc:
@@ -650,9 +682,7 @@ class Capturer:
             self.pending_missing.setdefault(key, now)
             return
         self.pending_missing.pop(key, None)
-        rt = self.runtime[key]
         sig = _sig(st)
-        due_verify = now - rt.get("last_verify", 0.0) >= self.verify_seconds and rt.get("dirty_since_verify")
         if sig == rt.get("stat") and not due_verify:
             return
         self._process(key, rec["path"], st, now, full_verify=bool(due_verify))
@@ -878,6 +908,17 @@ class Capturer:
         if not force and now - self._last_heartbeat < HEARTBEAT_SECONDS:
             return
         self._last_heartbeat = now
+        # CPU % of one core (the ps / Activity Monitor convention), averaged
+        # over the trailing window. None until a full window has passed.
+        wall, cpu = time.monotonic(), time.process_time()
+        self._cpu_samples.append((wall, cpu))
+        while len(self._cpu_samples) > 2 and wall - self._cpu_samples[1][0] >= CPU_WINDOW_SECONDS:
+            self._cpu_samples.pop(0)
+        first_wall, first_cpu = self._cpu_samples[0]
+        cpu_percent = (
+            round(100 * (cpu - first_cpu) / (wall - first_wall), 2)
+            if wall - first_wall >= CPU_WINDOW_SECONDS else None
+        )
         v.atomic_write_json(self.root / v.STATUS_FILE, {
             "version": 1,
             "pid": os.getpid(),
@@ -885,6 +926,7 @@ class Capturer:
             "last_poll": v.iso_utc(now),
             "poll_seconds": self.poll_seconds,
             "n_files": len(self.records),
+            "cpu_percent": cpu_percent,
             "sources": {
                 src.name: dict(root=str(src.root), parser=src.parser, **self.source_state.get(src.name, {}))
                 for src in self.sources

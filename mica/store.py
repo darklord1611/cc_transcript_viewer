@@ -58,6 +58,10 @@ GAP_EVENTS = frozenset({"unreadable", "access_lost", "access_restored", "capture
 # A heartbeat older than this means the daemon is not running.
 HEARTBEAT_STALE_SECONDS = 30
 
+# The daemon normally uses well under 1% of one core; above this the viewer
+# shows a warning, since something (a huge tree, a bug) is making it work hard.
+CPU_WARN_PERCENT = 2.0
+
 # Claude Code's default transcript retention when settings.json doesn't set
 # cleanupPeriodDays. Deletions of files older than the retention are expected.
 CLAUDE_DEFAULT_CLEANUP_DAYS = 30
@@ -68,6 +72,7 @@ _GEN_RE = re.compile(r"^g\d{4,}$")
 # How many differing lines a comparison reports individually.
 DIFF_SAMPLE_LINES = 200
 DIFF_PREVIEW_CHARS = 240
+DIFF_TEXT_CHARS = 600
 
 
 # ---------------------------------------------------------------------------
@@ -157,12 +162,64 @@ def claude_cleanup_days(settings_path: Path | None = None) -> int:
     return CLAUDE_DEFAULT_CLEANUP_DAYS
 
 
+def _clip(text: str, n: int) -> str:
+    return text[:n] + ("…" if len(text) > n else "")
+
+
+def _record_text(rec: dict) -> str:
+    """The human-readable part of one transcript record (message text, tool
+    calls and results, thinking), for showing a changed line in a diff.
+    Covers both record shapes: Claude Code's ``message.content`` blocks and
+    Codex's ``payload``."""
+    parts: list = []
+
+    def walk(c):
+        if isinstance(c, str):
+            parts.append(c)
+        elif isinstance(c, list):
+            for item in c:
+                walk(item)
+        elif isinstance(c, dict):
+            kind = c.get("type")
+            if kind == "tool_use":
+                inp = c.get("input")
+                main = next((inp[k] for k in ("command", "file_path", "pattern", "query", "url", "prompt")
+                             if isinstance(inp, dict) and isinstance(inp.get(k), str)), None)
+                parts.append(f"[{c.get('name') or 'tool'}] " + (main if main is not None else json.dumps(inp, ensure_ascii=False)))
+            elif kind == "tool_result":
+                parts.append("[result] ")
+                walk(c.get("content"))
+            elif kind == "thinking":
+                parts.append("(thinking) " + str(c.get("thinking") or ""))
+            else:
+                for field in ("text", "output_text", "input_text"):
+                    if isinstance(c.get(field), str):
+                        parts.append(c[field])
+                        break
+
+    msg = rec.get("message")
+    payload = rec.get("payload")
+    if isinstance(msg, dict):
+        walk(msg.get("content"))
+    elif isinstance(payload, dict):
+        if payload.get("name"):
+            parts.append(f"[{payload['name']}] ")
+        for field in ("content", "message", "text", "arguments", "output", "summary"):
+            if payload.get(field):
+                walk(payload[field])
+                break
+    elif "content" in rec:
+        walk(rec.get("content"))
+    return " ".join(" ".join(parts).split())
+
+
 def _line_preview(line: bytes) -> dict:
-    """A short, display-only description of one JSONL line."""
-    text = line.decode("utf-8", errors="replace")
-    info: dict = {"preview": text[:DIFF_PREVIEW_CHARS] + ("…" if len(text) > DIFF_PREVIEW_CHARS else "")}
+    """A short, display-only description of one JSONL line: who/what it is,
+    when, its readable text, and the start of the raw JSON."""
+    raw = line.decode("utf-8", errors="replace")
+    info: dict = {"preview": _clip(raw, DIFF_PREVIEW_CHARS)}
     try:
-        rec = json.loads(text)
+        rec = json.loads(raw)
     except ValueError:
         return info
     if isinstance(rec, dict):
@@ -172,6 +229,15 @@ def _line_preview(line: bytes) -> dict:
         payload = rec.get("payload")
         if isinstance(payload, dict) and isinstance(payload.get("type"), str):
             info.setdefault("subtype", payload["type"])
+        msg = rec.get("message")
+        role = msg.get("role") if isinstance(msg, dict) else None
+        if not role and isinstance(payload, dict):
+            role = payload.get("role")
+        if isinstance(role, str):
+            info["role"] = role
+        text = _record_text(rec)
+        if text:
+            info["text"] = _clip(text, DIFF_TEXT_CHARS)
     return info
 
 
@@ -270,6 +336,8 @@ class StoreReader:
         age = None if last is None else max(0.0, time.time() - last)
         index = self.index()
         flagged = sum(1 for e in index.values() if e.get("flags"))
+        cpu = hb.get("cpu_percent")
+        cpu = cpu if isinstance(cpu, (int, float)) and not isinstance(cpu, bool) else None
         return {
             "enabled": True,
             "root": str(self.root),
@@ -279,6 +347,8 @@ class StoreReader:
             "sources": hb.get("sources") or {},
             "n_files": len(index),
             "n_flagged": flagged,
+            "cpu_percent": cpu,
+            "cpu_warn": cpu is not None and cpu > CPU_WARN_PERCENT,
         }
 
     def index(self) -> dict:
@@ -407,6 +477,34 @@ class StoreReader:
             return None
         return max(gens, key=lambda g: (g.get("size") or 0, -gens.index(g)))
 
+    def _changes(self, key: str, gens: list, live_path) -> list:
+        """What each recorded change did: a line diff between every closed
+        capture and what came next (the following capture, or the live file
+        when no new capture was started, e.g. after the file was emptied).
+        A deletion has nothing after it, so it has no diff."""
+        changes = []
+        for i, gen in enumerate(gens):
+            if not gen.get("closed") or gen.get("close_reason") == "deleted":
+                continue
+            before = self.generation_path(key, gen)
+            if i + 1 < len(gens):
+                after, after_id = self.generation_path(key, gens[i + 1]), gens[i + 1].get("id")
+            elif live_path and Path(live_path).is_file():
+                after, after_id = Path(live_path), "live"
+            else:
+                continue
+            try:
+                with open(before, "rb") as fh:
+                    old = fh.read()
+                with open(after, "rb") as fh:
+                    new = fh.read()
+            except (OSError, TypeError):
+                continue
+            change = {"from": gen.get("id"), "to": after_id, "reason": gen.get("close_reason"), "at": gen.get("closed")}
+            change.update(diff_lines(old, new))
+            changes.append(change)
+        return changes
+
     def compare(self, key: str, live_path, cleanup_days: int | None = None) -> dict:
         """Full comparison of a live transcript with its capture.
 
@@ -439,6 +537,7 @@ class StoreReader:
         old_path = self.generation_path(old_key, old_gen) if old_gen else None
         if old_path:
             result["recreated_from_file"] = str(old_path)
+        result["changes"] = self._changes(key, gens, live_path)
         for g in gens:
             gpath = self.generation_path(key, g)
             result["generations"].append({

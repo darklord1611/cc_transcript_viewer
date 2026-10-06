@@ -1004,6 +1004,9 @@ function renderTranscript(data, opts = {}) {
   // Parsed sessions carry no path of their own; the id we loaded them by is one
   // (except for the synthetic Cursor database schemes).
   const transcriptFile = data.file || CURRENT_FILE;
+  // Mica: a 🔒 beside "Jump to end" when the transcript matches its capture,
+  // or a banner below the (sticky) header when there's something to report.
+  const mica = !STANDALONE && MICA_STATUS.enabled ? micaBanner(data, transcriptFile) : null;
   const header = el(
     "div",
     { class: "t-header" },
@@ -1110,11 +1113,12 @@ function renderTranscript(data, opts = {}) {
         onclick: saveTranscriptHtml,
         title: "Download this transcript as one self-contained HTML file you can share",
       }, "Save HTML"),
-      el("button", { class: "btn", onclick: scrollToEnd }, "⤓ Jump to end")
+      el("button", { class: "btn", onclick: scrollToEnd }, "⤓ Jump to end"),
+      mica ? mica.lock : null
     )
   );
-  if (!STANDALONE && MICA_STATUS.enabled) header.append(micaBanner(data, transcriptFile));
   t.append(header);
+  if (mica) t.append(mica.box);
 
   const events = data.events || [];
   const progressFill = el("div", { class: "render-progress-fill" });
@@ -2281,24 +2285,31 @@ function renderMicaStatus() {
     FLAGGED_ONLY = false;
     renderSidebar($("#search").value);
   }
-  const key = [v.running, v.n_files, flagged, FLAGGED_ONLY].join("|");
+  const busy = v.running && v.cpu_warn;
+  const key = [v.running, v.n_files, flagged, FLAGGED_ONLY, busy && v.cpu_percent].join("|");
   const age = v.heartbeat_age == null ? null : Math.round(v.heartbeat_age);
-  box.title = v.running
-    ? `Mica at ${v.root} (last heartbeat ${age}s ago)`
+  box.title = busy
+    ? `Mica is using ${v.cpu_percent}% of one CPU core (it normally uses well under 1%). ` +
+      "Check `python3 -m mica status`; something may be making it work too hard."
+    : v.running
+    ? `Mica at ${v.root} (last heartbeat ${age}s ago)` +
+      (v.cpu_percent != null ? `, ${v.cpu_percent}% CPU` : "")
     : `No heartbeat from Mica${age == null ? "" : " for " + age + "s"}: transcripts are not being captured right now.`;
   if (key === MICA_STATUS_KEY) return;
   MICA_STATUS_KEY = key;
   box.hidden = false;
-  box.className = "mica-status" + (v.running ? "" : " mica-down");
-  box.replaceChildren(
+  box.className = "mica-status" + (v.running ? (busy ? " mica-busy" : "") : " mica-down");
+  // replaceChildren (unlike el) would render a null child as the text "null".
+  box.replaceChildren(...[
     el("span", { class: "mica-dot", "aria-hidden": "true" }),
     el("span", {}, v.running ? "Mica capturing" : "Mica not running"),
+    busy ? el("span", { class: "mica-cpu" }, `⚠ ${v.cpu_percent}% CPU`) : null,
     el("span", { class: "mica-count" }, `${v.n_files} captured`),
     flagged
       ? el("button", {
           class: "mica-flag-btn" + (FLAGGED_ONLY ? " on" : ""),
           type: "button",
-          title: FLAGGED_ONLY ? "Show every session" : "Show only sessions the store flagged",
+          title: FLAGGED_ONLY ? "Show every session" : "Show only sessions Mica flagged",
           onclick: () => {
             FLAGGED_ONLY = !FLAGGED_ONLY;
             renderSidebar($("#search").value);
@@ -2306,8 +2317,8 @@ function renderMicaStatus() {
             renderMicaStatus();
           },
         }, FLAGGED_ONLY ? "Show all" : `⚠ ${flagged} flagged`)
-      : null
-  );
+      : null,
+  ].filter(Boolean));
 }
 
 function micaSig(file) {
@@ -2321,27 +2332,31 @@ function micaSig(file) {
 // by the sidebar poll) triggers a fresh comparison.
 function micaBanner(data, file) {
   const box = el("div", { class: "mica-banner", hidden: "" });
+  const lock = el("span", { class: "mica-lock", role: "img", hidden: "" }, "🔒");
   const sig = micaSig(file);
   if (MICA_COMPARE && MICA_COMPARE.file === file && MICA_COMPARE.sig === sig) {
-    fillMicaBanner(box, MICA_COMPARE.result, data);
-    return box;
+    fillMicaBanner(box, lock, MICA_COMPARE.result, data);
+    return { box, lock };
   }
   fetch("/api/mica-compare?file=" + encodeURIComponent(file))
     .then((r) => r.json())
     .then((result) => {
       if (result.error) return;
       MICA_COMPARE = { file, sig, result };
-      if (CURRENT_FILE === file) fillMicaBanner(box, result, data);
+      if (CURRENT_FILE === file) fillMicaBanner(box, lock, result, data);
     })
     .catch(() => {});
-  return box;
+  return { box, lock };
 }
 
 function refreshMicaBanner() {
-  const old = $("#transcript .mica-banner");
-  if (!old || !CURRENT_DATA) return;
+  const oldBox = $("#transcript .mica-banner");
+  const oldLock = $("#transcript .mica-lock");
+  if (!oldBox || !oldLock || !CURRENT_DATA) return;
   MICA_COMPARE = null;
-  old.replaceWith(micaBanner(CURRENT_DATA, CURRENT_FILE));
+  const fresh = micaBanner(CURRENT_DATA, CURRENT_FILE);
+  oldBox.replaceWith(fresh.box);
+  oldLock.replaceWith(fresh.lock);
 }
 
 function micaOpenLink(file, label, title) {
@@ -2364,10 +2379,48 @@ function describeMicaEvent(ev) {
   return `${fmtTime(ev.t)} — ${label}${extra}`;
 }
 
-function fillMicaBanner(box, r, data) {
+// One diff, as removed (−) and added (+) transcript lines, each shown by
+// who/when plus its readable text (raw JSON on hover). Small diffs start open.
+function micaDiffBlock(title, d, removedLabel, addedLabel) {
+  const total = (d.missing_count || 0) + (d.extra_count || 0);
+  const block = el("div", { class: "mica-diff" + (total > 40 ? " collapsed" : "") });
+  const row = (sign, it) => el("div", { class: "mica-diff-line mica-diff-" + (sign === "−" ? "del" : "add"), title: it.preview },
+    el("span", { class: "mica-diff-sign" }, sign),
+    el("span", { class: "mica-diff-no" }, "line " + it.line),
+    el("span", { class: "mica-diff-meta" },
+      [it.role || it.type, it.subtype, it.timestamp ? fmtTime(it.timestamp) : ""].filter(Boolean).join(" · ")),
+    el("span", { class: "mica-diff-text" }, it.text || it.preview));
+  const more = (shown, count) => count > shown
+    ? el("div", { class: "mica-note" }, `…and ${count - shown} more (open the capture to see everything).`) : null;
+  const missing = d.missing || [], extra = d.extra || [];
+  block.append(
+    toggleHead(block, "mica-diff-head", `${title}: ${d.missing_count} ${removedLabel}, ${d.extra_count} ${addedLabel}`),
+    el("div", { class: "mica-diff-body" },
+      ...missing.map((it) => row("−", it)), more(missing.length, d.missing_count),
+      ...extra.map((it) => row("+", it)), more(extra.length, d.extra_count))
+  );
+  return block;
+}
+
+function fillMicaBanner(box, lock, r, data) {
   const copy = data.mica_copy;
   const flags = r.flags || [];
   const gens = r.generations || [];
+
+  // Nothing to report: just the lock, with the details on hover.
+  const matches = (r.state === "verified" || r.state === "ahead") && !flags.length && !copy;
+  lock.hidden = !matches;
+  if (matches) {
+    const label = "Matches Mica's capture" +
+      (r.state === "ahead" ? " (the newest lines are still being copied)" : "");
+    lock.title = label;
+    lock.setAttribute("aria-label", label);
+  }
+  if (matches || r.state === "untracked") {
+    box.hidden = true;
+    return;
+  }
+
   const line = (...kids) => el("div", { class: "mica-line" }, ...kids);
   const kids = [];
   let tone = flags.length ? "bad" : "ok";
@@ -2404,10 +2457,6 @@ function fillMicaBanner(box, r, data) {
       kids.push(line(`🗄 Claude Code's retention cleanup removed this transcript${deletedEv ? " at " + fmtTime(deletedEv.t) : ""}; ` +
         "Mica kept a copy."));
       break;
-    case "untracked":
-      tone = "muted";
-      kids.push(line("Not captured by Mica (yet)."));
-      break;
     default:
       return;
   }
@@ -2443,25 +2492,18 @@ function fillMicaBanner(box, r, data) {
           (g.closed ? `, closed ${fmtTime(g.closed)} (${g.close_reason})` : ", current")
       ))));
   }
+  // What each recorded change actually did, line by line.
+  for (const ch of r.changes || []) {
+    const label = MICA_FLAG_LABELS[ch.reason] || ch.reason;
+    kids.push(micaDiffBlock(
+      `What changed when it was ${label} (${fmtTime(ch.at)}, ${ch.from} → ${ch.to === "live" ? "live file" : ch.to})`,
+      ch, "removed", "added"));
+  }
   if (r.state === "modified" && r.diff) {
-    const d = r.diff;
     const cur = gens.find((g) => g.id === r.compared_generation);
     if (cur && cur.file) kids.push(line(micaOpenLink(cur.file, "Open the captured version (" + cur.id + ")")));
-    const block = el("div", { class: "mica-diff collapsed" });
-    const sample = (title, items) => items.length ? [
-      el("div", { class: "mica-sub" }, title),
-      ...items.map((it) => el("div", { class: "mica-diff-line" },
-        el("span", { class: "mica-diff-no" }, "line " + it.line),
-        [it.type, it.timestamp].filter(Boolean).join(" · ") + (it.type || it.timestamp ? " — " : ""),
-        el("code", {}, it.preview))),
-    ] : [];
-    block.append(
-      toggleHead(block, "mica-diff-head", "Differing lines"),
-      el("div", { class: "mica-diff-body" },
-        ...sample(`Captured but missing from the live file (${d.missing_count}):`, d.missing || []),
-        ...sample(`In the live file but never captured (${d.extra_count}):`, d.extra || []))
-    );
-    kids.push(block);
+    kids.push(micaDiffBlock("How the live file differs from the capture", r.diff,
+      "captured but missing from the live file", "in the live file but never captured"));
   }
   if (r.preexisting && (flags.length || r.state === "modified")) {
     kids.push(el("div", { class: "mica-note" },
@@ -2470,7 +2512,7 @@ function fillMicaBanner(box, r, data) {
 
   box.className = "mica-banner mica-" + tone;
   box.hidden = false;
-  box.replaceChildren(...kids);
+  box.replaceChildren(...kids.filter(Boolean));
 }
 
 // ---------- live polling (always on) ----------

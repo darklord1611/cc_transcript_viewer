@@ -896,6 +896,8 @@ pre.payload.diff { padding: 0; }
 .mica-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--tool); flex: none; }
 .mica-status.mica-down { color: var(--tool-err); }
 .mica-status.mica-down .mica-dot { background: var(--tool-err); }
+.mica-status.mica-busy .mica-dot { background: #d9900a; }
+.mica-cpu { color: light-dark(#8a5a00, #e8b45a); font-weight: 600; cursor: help; }
 .mica-count { opacity: .8; }
 .mica-flag-btn {
   margin-left: auto; font: inherit; font-size: 11px; cursor: pointer;
@@ -909,8 +911,9 @@ pre.payload.diff { padding: 0; }
 }
 .mica-tag.mica-bad { color: var(--tool-err); background: rgba(209,36,47,.08); border: 1px solid rgba(209,36,47,.3); }
 .mica-tag.mica-info { color: var(--muted); background: var(--bg-elev); }
+.mica-lock { align-self: center; cursor: help; font-size: 15px; }
 .mica-banner {
-  margin: 10px 0 2px; padding: 8px 12px; border-radius: 8px; font-size: 12.5px;
+  margin: 0 0 14px; padding: 8px 12px; border-radius: 8px; font-size: 12.5px;
   border: 1px solid var(--border); background: var(--bg-alt);
 }
 .mica-banner.mica-ok { color: var(--tool); background: rgba(31,122,69,.06); border-color: rgba(31,122,69,.22); padding: 4px 10px; }
@@ -926,7 +929,16 @@ pre.payload.diff { padding: 0; }
 .mica-diff { margin-top: 8px; }
 .mica-diff-head { cursor: pointer; font-weight: 600; font-size: 12px; display: flex; gap: 6px; align-items: center; }
 .collapsible.collapsed > .mica-diff-body { display: none; }
-.mica-diff-body { max-height: 360px; overflow: auto; margin-top: 4px; }
-.mica-diff-line { font-size: 11.5px; padding: 2px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
-.mica-diff-line code { font-family: var(--mono); font-size: 11px; }
-.mica-diff-no { color: var(--muted); margin-right: 6px; font-family: var(--mono); }
+.mica-diff-body { max-height: 420px; overflow: auto; margin-top: 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.mica-diff-line {
+  display: grid; grid-template-columns: 14px 58px 150px 1fr; gap: 6px; align-items: baseline;
+  font-size: 11.5px; padding: 3px 6px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere;
+}
+.mica-diff-del { background: rgba(209,36,47,.06); }
+.mica-diff-add { background: rgba(31,122,69,.07); }
+.mica-diff-sign { font-family: var(--mono); font-weight: 700; }
+.mica-diff-del .mica-diff-sign { color: var(--diff-del-text); }
+.mica-diff-add .mica-diff-sign { color: var(--diff-add-text); }
+.mica-diff-no { color: var(--muted); font-family: var(--mono); }
+.mica-diff-meta { color: var(--muted); }
+.mica-diff-text { color: var(--text); }
