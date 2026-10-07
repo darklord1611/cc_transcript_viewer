@@ -313,11 +313,12 @@ transcript gets a banner comparing it with its capture, with links to open every
 and every event Mica recorded for it; a transcript with recorded events but no flags (say, a Codex
 archive move) gets a neutral banner listing them. The viewer shows the store as recorded: every flag the daemon
 set (including any it has no label for), and every captured transcript, so one the live list doesn't
-show (deleted, unreadable, or unparseable) is listed from Mica's copy. Store-wide gaps (the daemon
-not running, a whole folder unreadable, a file Mica could never open) appear as "N gaps" in the
-sidebar status, and a store it can't read shows as an error there. Without Mica installed, none of
-this appears. The viewer is your repo's code, so an agent can edit it; when it matters, check with
-`python3 -m mica flagged` or read `/Library/Mica` directly.
+show (deleted, unreadable, or unparseable) is listed from Mica's copy. Store-wide gaps (a whole
+folder unreadable, a file Mica could never open) appear as "N gaps" in the sidebar status, and a
+store it can't read shows as an error there. Downtime gaps aren't shown in the viewer;
+`python3 -m mica flagged` lists them. Without Mica installed, none of this appears. The viewer is
+your repo's code, so an agent can edit it; when it matters, check with `python3 -m mica flagged` or
+read `/Library/Mica` directly.
 
 Sleep needs nothing special: the daemon pauses and resumes with everything else. After a restart,
 launchd starts it again and it records a store-wide `capture_gap` for the downtime (not a flag), then

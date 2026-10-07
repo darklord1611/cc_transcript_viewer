@@ -2292,7 +2292,6 @@ const MICA_EVENT_LABELS = {
   moved: "moved",
   inode_changed: "rewritten in place with the same content",
   readable_again: "access restored",
-  capture_gap: "Mica was not running",
   access_lost: "lost access to a transcript folder",
   access_restored: "access to the folder restored",
 };
@@ -2341,10 +2340,11 @@ function renderMicaStatus() {
   const busy = v.running && v.cpu_warn;
   const failures = Object.entries(v.sources || {}).filter(([, src]) => src.ok === false);
   const incomplete = v.running && failures.length > 0;
+  // Downtime (a reboot, say) isn't shown: Mica re-compares every file when it restarts.
+  const storeEvents = (v.store_events || []).filter((e) => e.type !== "capture_gap");
   const key = [v.running, v.n_files, flagged, FLAGGED_ONLY, busy && v.cpu_percent,
-    JSON.stringify(failures), v.error, (v.store_events || []).length].join("|");
+    JSON.stringify(failures), v.error, storeEvents.length].join("|");
   const age = v.heartbeat_age == null ? null : Math.round(v.heartbeat_age);
-  const storeEvents = v.store_events || [];
   box.title = v.error
     ? "Mica: " + v.error
     : incomplete
