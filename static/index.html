@@ -11,7 +11,7 @@
       // Solarized was replaced by the more distinct Botanical palette.
       const theme = savedTheme === "solarized" ? "botanical" : savedTheme;
       if (["warm", "paper", "botanical", "lavender", "sorbet", "night", "terminal",
-           "highlighter", "nineties", "system7", "bauhaus", "artdeco"].includes(theme)) {
+           "highlighter", "nineties", "system7", "bauhaus", "artdeco", "riso", "synthwave"].includes(theme)) {
         document.documentElement.dataset.theme = theme;
         if (theme !== savedTheme) localStorage.setItem("transcript-viewer:theme", theme);
       }
@@ -38,6 +38,7 @@
           crossorigin="anonymous"></script>
 </head>
 <body>
+  <div id="setup-banner" class="setup-banner" role="status" hidden></div>
   <div id="app">
     <aside id="sidebar">
       <div id="sidebar-header">
@@ -64,9 +65,10 @@
           <button class="filter-chip" data-agent="claude">Claude</button>
           <button class="filter-chip" data-agent="codex">Codex</button>
           <button class="filter-chip" data-agent="cursor">Cursor</button>
+          <button class="filter-chip" data-agent="opencode">opencode</button>
         </div>
         <div id="filter-dropdowns"></div>
-        <div id="sidebar-stats" class="muted"></div>
+        <div id="mica-status" class="mica-status" hidden></div>
       </div>
       <div id="session-list"><div class="empty-note">Loading sessions…</div></div>
     </aside>
@@ -74,7 +76,7 @@
     <main id="main">
       <div id="welcome" class="welcome">
         <h1>Transcript Viewer</h1>
-        <p class="muted">Claude Code, Codex, and Cursor sessions, newest first. Select one on the
+        <p class="muted">Claude Code, Codex, Cursor, and opencode sessions, newest first. Select one on the
           left to view the full conversation — every prompt, response, thought, and tool call.</p>
         <ul class="legend">
           <li><span class="dot dot-user"></span> User prompt</li>

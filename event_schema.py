@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The event contract between the parsers and the frontend.
 
-Every parser (claude_parser, codex_parser, cursor_parser) emits a session as
+Every parser (claude_parser, codex_parser, cursor_parser, opencode_parser)
+emits a session as
 ``{"agent", "id", "title", "meta", "events", ...}`` where ``events`` is a flat
 list of dicts, each with a ``kind``. The frontend's renderEvent() dispatches on
 ``kind``; this module is the single written-down description of what each kind
@@ -10,8 +11,10 @@ the contract can't silently drift.
 
 Two message shapes exist for ``user``/``assistant`` events:
 
-- **Block shape** (Claude Code and Cursor): a ``blocks`` list whose items are
-  ``{"type": "text"|"thinking"|"image"|"tool_use", ...}``. Tool calls ride
+- **Block shape** (Claude Code, Cursor, and opencode): a ``blocks`` list whose items are
+  ``{"type": "text"|"thinking"|"image"|"tool_use", ...}``. A ``thinking``
+  block may carry ``has_encrypted`` when the provider also returned an opaque
+  reasoning blob, i.e. the text is a summary. Tool calls ride
   inside the assistant turn, with their result attached on the block.
 - **Flat shape** (Codex): plain ``text`` on the event; reasoning and tool
   calls arrive as separate top-level events (``reasoning``, ``tool``).
@@ -26,7 +29,10 @@ Kinds
 - ``user``        — a real user prompt. Block or flat shape; flat shape may
                     carry ``images``/``local_images`` payloads.
 - ``assistant``   — a model turn. Block or flat shape; may carry
-                    ``turn_metadata`` (folded Codex bookkeeping) and ``usage``.
+                    ``turn_metadata`` (folded Codex bookkeeping) and ``usage``;
+                    ``recovered: true`` marks a message Cursor dropped from its
+                    conversation index, restored from an orphaned bubble row
+                    (timeline placement is approximate).
 - ``reasoning``   — Codex reasoning summary: ``text``, ``has_encrypted``.
 - ``tool``        — Codex tool call: ``name``, ``input``, ``summary``,
                     ``result`` (dict or null).
@@ -90,7 +96,7 @@ def _validate_block(b, where: str, errors: list) -> None:
 
 
 def validate_event(ev, where: str = "event") -> list[str]:
-    """Return a list of contract violations for one event ('' problems == valid)."""
+    """Return a list of contract violations for one event (empty == valid)."""
     errors: list[str] = []
     if not isinstance(ev, dict):
         return [f"{where}: event is not a dict"]
@@ -159,10 +165,13 @@ def validate_event(ev, where: str = "event") -> list[str]:
     return errors
 
 
-# Fields every sidebar summary must carry, for every agent and source.
+# Fields every sidebar summary must carry, for every agent and source — the
+# same core that common.make_summary() emits. Per-agent extras (ai_title,
+# cursor_source, tokens_used, sub-agent fields, …) are allowed on top.
 REQUIRED_SUMMARY_FIELDS = {
-    "agent", "id", "file", "title", "cwd", "mtime",
-    "n_user", "n_assistant", "n_tool", "n_records",
+    "agent", "id", "file", "title", "cwd", "git_branch", "version",
+    "first_ts", "last_ts", "n_user", "n_assistant", "n_tool", "n_web",
+    "n_records", "model", "mtime",
 }
 
 
@@ -172,7 +181,7 @@ def validate_summary(summary, where: str = "summary") -> list[str]:
         return [f"{where}: summary is not a dict"]
     missing = REQUIRED_SUMMARY_FIELDS - set(summary)
     _check(errors, not missing, where, f"missing required fields {sorted(missing)}")
-    _check(errors, summary.get("agent") in ("claude", "codex", "cursor"), where,
+    _check(errors, summary.get("agent") in ("claude", "codex", "cursor", "opencode"), where,
            f"unknown agent {summary.get('agent')!r}")
     return errors
 
@@ -182,7 +191,7 @@ def validate_session(data, where: str = "session") -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
         return [f"{where}: session is not a dict"]
-    _check(errors, data.get("agent") in ("claude", "codex", "cursor"), where,
+    _check(errors, data.get("agent") in ("claude", "codex", "cursor", "opencode"), where,
            f"unknown agent {data.get('agent')!r}")
     _check(errors, isinstance(data.get("id"), str) and data.get("id"), where, "needs str 'id'")
     _check(errors, isinstance(data.get("title"), str), where, "needs str 'title'")

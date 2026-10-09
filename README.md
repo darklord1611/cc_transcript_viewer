@@ -1,7 +1,9 @@
-# Claude Code, Codex, and Cursor Transcript Viewer
+# Claude Code, Codex, Cursor, and opencode Transcript Viewer
 
 A tiny, **zero-dependency** local web app for browsing your local coding-agent transcripts —
-**Claude Code, Codex, and Cursor together** in one time-sorted view.
+**Claude Code, Codex, Cursor, and opencode together** in one time-sorted view.
+
+![The viewer showing a Claude Code session: the session sidebar with agent filters on the left, the rendered transcript with thinking blocks and sub-agent calls in the middle, and the user-message outline on the right](screenshot.png)
 
 It reads:
 
@@ -12,6 +14,7 @@ It reads:
 - Cursor CLI / agent transcripts from
   `~/.cursor/chats/<workspace-hash>/<session>/store.db` (full fidelity), with a
   lossy JSONL fallback under `~/.cursor/projects/<project>/agent-transcripts/`
+- opencode sessions from its SQLite database at `~/.local/share/opencode/opencode.db`
 
 Nothing is uploaded anywhere. Transcript sources are opened read-only; the only write is the
 viewer-owned custom-names file. The app listens on loopback only, contains no outbound-network code,
@@ -20,12 +23,63 @@ and has a [test suite](#privacy--security) that verifies those guarantees.
 > [!WARNING]
 > **This is vibe-coded.** It was built quickly and iteratively with an AI coding agent, so expect
 > rough edges and the occasional rendering bug. It also depends on the *current* on-disk transcript
-> formats of Claude Code, Codex, and Cursor — if any tool changes how it saves sessions, parts of the
-> viewer may silently break or drop records until the parser is updated.
+> formats of Claude Code, Codex, Cursor, and opencode — if any tool changes how it saves sessions, parts of the
+> viewer may silently break or drop records until the parser is updated. If you'd rather not run
+> someone else's vibe-code at all, [prompt_request.md](prompt_request.md) is a build-it-yourself
+> prompt for your own coding agent (it describes the original Claude Code + Codex core; the Cursor
+> and opencode sources came later).
+
+## Do this first: two settings that can't backfill
+
+Both coding agents throw away, by default, exactly the things this viewer is best at showing. Neither
+setting applies retroactively, so change them before you accumulate sessions you wish you could read.
+
+**Claude Code** — edit your global settings at `~/.claude/settings.json`:
+
+```jsonc
+{
+  // Days to keep transcripts before automatic cleanup (default: 30 — after which
+  // they're deleted and this viewer has nothing to show).
+  // A large value effectively keeps them forever (~274 years here).
+  "cleanupPeriodDays": 99999,
+
+  // Persist human-readable thinking summaries. Without this, Claude Code stores
+  // only an encrypted signature for thinking blocks, so they show up empty in
+  // the viewer. With it on, NEW sessions save a readable summary.
+  "showThinkingSummaries": true
+}
+```
+
+Restart Claude Code (or run `/config` once) for the change to take effect. Note this only stops
+*future* deletion — anything already cleaned up is gone.
+
+The viewer accepts `cleanupPeriodDays >= 10000`; the example above keeps transcripts for longer.
+
+**Codex** — add to `~/.codex/config.toml`:
+
+```toml
+model_reasoning_summary = "detailed"
+```
+
+Codex doesn't save raw chain-of-thought in readable form for OpenAI models, but with this set it
+saves readable summaries of it. Encrypted-only reasoning records contain no displayable text and are
+omitted by the viewer.
+
+The live viewer automatically checks these three recommendations for agents whose configured
+home folders exist. Missing, different, or unreadable settings produce a banner at the top with
+the setting and file to update. Click **×** to dismiss it; dismissal survives reloads for the same
+set of issues. A new issue, or a setting regressing after it was fixed, shows the reminder again.
+The checks are read-only and independent of Mica: every captured deletion remains flagged,
+whatever the retention setting says. The Codex check needs Python 3.11+ (for `tomllib`) and is
+skipped on older Pythons.
 
 ## Run it
 
+Python 3.9+ and the standard library are all it needs — no `pip install`, no build step:
+
 ```bash
+git clone https://github.com/tim-hua-01/cc_transcript_viewer.git
+cd cc_transcript_viewer
 python3 server.py
 ```
 
@@ -41,6 +95,7 @@ python3 server.py --codex-home PATH      # different Codex home (default ~/.code
 python3 server.py --cursor-db PATH       # different Cursor state.vscdb (or its Cursor app-support dir)
 python3 server.py --cursor-chats-dir PATH     # different ~/.cursor/chats (CLI store.db sessions)
 python3 server.py --cursor-projects-dir PATH  # different ~/.cursor/projects (CLI JSONL fallback)
+python3 server.py --opencode-db PATH     # different opencode.db (or the opencode data dir holding it)
 python3 server.py --custom-names-file PATH # different custom transcript names file
 ```
 
@@ -56,9 +111,12 @@ accumulated.
 
 ## Features
 
-- **One sidebar, sorted by time.** Every Claude Code, Codex, and Cursor session in a single flat list,
-  newest (most recently modified) first — no per-project grouping. Each entry shows an **agent tag**
-  (Claude / Codex / Cursor), a **CLI** badge for Cursor command-line agent transcripts, the project
+- **One sidebar, sorted by time.** Every Claude Code, Codex, Cursor, and opencode session in a single
+  flat list, newest first — no per-project grouping. Sessions sort by their last recorded
+  message, not file modification time, so a tool quietly rewriting an old transcript's bookkeeping
+  (as Claude Code does) can't shuffle it to the top. Each entry shows an
+  **agent tag** (Claude / Codex / Cursor / opencode), a **CLI** badge for Cursor command-line agent
+  transcripts, the project
   path, recency, message/tool/web counts, model, and the full session **id** (click to copy).
 - **Readable and custom titles.** Each session is titled with the first ~100 characters of its
   first user message unless the source has an explicit title. Claude Code `/rename`/`--name` titles
@@ -69,16 +127,19 @@ accumulated.
 - **Search across everything.** The search box (press `/` to focus) matches session **content** —
   prompts, replies, reasoning, tool commands/paths/queries/outputs — in addition to titles and
   directories, and shows a snippet of the match. Viewer custom-title matches receive `10,000×`
-  weight, native Claude/Cursor titles receive `5,000×`, every user-message match receives `50×`,
+  weight, native Claude/Cursor/opencode titles receive `5,000×`, every user-message match receives `50×`,
   and ordinary transcript-content matches receive `1×`. Powered by `/api/search` with an
   mtime-keyed cache.
 - **Filters that compose.**
-  - **All / Claude / Codex / Cursor** chips.
+  - **All / Claude / Codex / Cursor / opencode** chips, each showing a live session count under the
+    current search and filters; chips whose count is zero hide themselves.
   - A **Model** dropdown grouped by family (Claude / GPT / Other): tick a family to select all its
     models, or pick individual ones (e.g. only Sonnet). The family box shows an indeterminate state
     on partial selection.
   - A **Directory** dropdown to narrow to specific project paths.
-- **Transcript view** — a chronological, color-coded conversation that renders all three agents'
+  - A **Date** dropdown with from/to calendar fields and quick presets (today, last 7/30 days),
+    filtering on each session's last activity.
+- **Transcript view** — a chronological, color-coded conversation that renders all four agents'
   formats:
   - User prompts and assistant replies as Markdown, **with LaTeX math** (KaTeX) and inline images.
   - **Thinking / reasoning** blocks (collapsed by default).
@@ -96,6 +157,10 @@ accumulated.
       the same renderers as Claude Code, so a Cursor `edit_file` shows the same colorized diff.
     - Cursor CLI: same tool renderers; results come from per-chat `store.db` when
       available. JSONL-only fallbacks omit tool outputs.
+    - opencode: `bash`, `read`, `edit`, `write`, `grep`, `glob`, `webfetch`, `task`, `todowrite`,
+      `skill`, `lsp`, `apply_patch`. opencode's camelCase arguments (`filePath`, `oldString`) are
+      renamed server-side onto the same renderers, and a `task` call links straight through to the
+      sub-agent session it spawned.
   - **Copy all text** copies user/assistant messages, reasoning, and tool calls (including diffs),
     but skips tool results and system/notice noise.
   - Codex task/context/token bookkeeping consolidated into one **Turn metadata** disclosure at the
@@ -107,12 +172,32 @@ accumulated.
   their trigger, before/after token counts, duration, and preserved message/tool counts. Codex
   boundaries show the context-window number, replacement-item count, and whether the replacement
   summary is encrypted and therefore unreadable from the transcript.
+- **Save transcript as a self-contained HTML file.** **Save HTML**, in the transcript controls,
+  downloads the open session as a single `.html` file you can hand to someone else — no server, no
+  `~/.claude` / `~/.codex` / Cursor or opencode database, no other sessions. It is the viewer's own
+  UI with one transcript baked in: `style.css` and `app.js` are inlined verbatim and the parsed
+  session is embedded as JSON, so the saved page renders through exactly the same code (same themes,
+  outline, collapsible thinking/tools, colorized diffs) rather than a separate export renderer that
+  could drift. Locally-referenced images are re-embedded as `data:` URIs; images that are missing or
+  larger than 4 MB (24 MB across the file) degrade to the viewer's "image omitted" note.
+  Server-backed features switch themselves off in a saved file — no session list, no live polling,
+  no rename, no reveal-in-Finder, and local file paths become labels instead of links. Markdown and
+  math still come from the same pinned, SRI-hashed CDN scripts the app uses, so an offline reader
+  gets plain text rather than rendered Markdown; everything else works with no network at all.
+
+  > [!WARNING]
+  > A saved transcript contains **the whole session** — prompts, replies, reasoning, tool commands
+  > and their output, file contents that were read or written, your `cwd` and branch names, and any
+  > secrets that passed through the conversation. Read it before you share it.
+
 - **Pull-request links.** Claude Code sessions associated with a PR show a safe, clickable PR link in
   the transcript header.
 - **Local source links.** Absolute Markdown links inside a session's workspace open through macOS
   Launch Services in the file's default application. Line suffixes such as `:42` are recognized and
   removed before opening (the default application decides where to position the document). Targets
-  outside the workspace and executable/application files are rejected.
+  outside the workspace and executable/application files are rejected. A 📂 button in the transcript
+  header reveals the transcript file itself in Finder (for sessions that live in a file rather than
+  a database).
 - **Images.** Inline images in prompts/replies and Codex `view_image` are shown. For
   Codex user prompts, the viewer prefers the original `local_images` file and falls back to the
   embedded `input_image` data URL if the file is gone.
@@ -132,13 +217,14 @@ accumulated.
   clickable headings and highlights the one you're reading as you scroll. Floating **↑ / ↓** buttons
   jump to the previous/next user prompt, and **Jump to end** (in the transcript controls) skips to
   the bottom. Sidebar and outline panels can be collapsed.
-- **Twelve themes.** Warm, Paper, Botanical, and Lavender cover the quiet solid palettes; Night is
+- **Fourteen themes.** Warm, Paper, Botanical, and Lavender cover the quiet solid palettes; Night is
   the standard dark option. The playful set changes the UI as well as its colors: Sorbet uses soft
   pills, while Terminal uses crisp monospace controls.
   Highlighter and Nineties are the two intentionally odd options, with chunky offset borders and
   classic desktop bevels respectively. System 7 draws from historic Macintosh interfaces, while
-  Bauhaus and Art Deco add broader design-history options through geometry and double rules. All
-  are static—no theme animations. The choice is stored in the browser on that machine and restored
+  Bauhaus and Art Deco add broader design-history options through geometry and double rules. Riso
+  layers misregistered pink and teal ink offsets on cream paper, and Synthwave is a neon-glow dark
+  option. All are static—no theme animations. The choice is stored in the browser on that machine and restored
   before the page paints.
 - **Live updates.** The sidebar refreshes about once a second, while an open on-disk transcript is
   checked about three times a second, so an in-progress session tails quickly without disturbing
@@ -172,31 +258,124 @@ This app reads your private transcripts, so it's built to keep them on your mach
 - **Local opens are confined.** `/api/open-local` accepts only JSON POSTs, resolves the requested
   path inside the selected session's workspace, rejects executables and application-like file types,
   and invokes `/usr/bin/open` directly without a shell. It is unavailable on non-macOS hosts.
+- **Exports are confined, and are the one thing that leaves.** `/api/export` resolves its `file`
+  through the same allowlist as `/api/session`, and embeds only that session plus the image files it
+  already referenced (image-typed only, as with `/api/local-image`). Nothing is uploaded — the file
+  lands in your downloads folder. But a saved transcript *is* the whole session in one shareable
+  file, so sharing one is on you: read it before you send it.
+- **Mica is read-only to the viewer.** When the optional [Mica](#optional-tamper-resistant-backups-mica)
+  is installed, the viewer reads its captures and flags; it never writes to it, and serves only
+  files Mica's own records name as captured transcripts.
 
 These guarantees are enforced by a zero-dependency test suite — run it yourself:
 
 ```bash
-python3 -m unittest            # everything: security, parsers, schema, caching
-python3 -m unittest test_security   # just the security guarantees
+python3 -m unittest                         # full suite
+python3 -m unittest tests.test_security     # security guarantees only
+python3 -m unittest tests.test_frontend_browser  # optional browser journey
 ```
 
 It spins the server up on loopback, exercises every endpoint with a socket-level guard installed, and
 fails if any request dials a non-loopback host; it also forges a foreign `Host` header to confirm the
 rebinding guard rejects it, and statically asserts neither module imports a network client and that
-the default bind is loopback.
+the default bind is loopback. Parser regressions are also checked against small, checked-in
+transcript files under `tests/fixtures/`. Those fixtures are fictional and use generated images and
+placeholder paths; their record shapes were compared with local stores, but no private transcript
+content was copied into the repository.
+
+The frontend browser journey uses Chrome or Chromium when one is installed, and otherwise skips. It
+opens a standalone export with networking stubbed out and checks the rendered conversation and Copy
+All behavior through the real DOM. This keeps the default suite dependency-free without replacing
+the focused parser and server tests with a large screenshot suite.
+
+## Optional: tamper-resistant backups (Mica)
+
+Coding agents run as your user, so an agent in full-access mode can delete or edit the very transcript
+files this viewer reads ([Qin et al., 2026](https://arxiv.org/abs/2609.30266) show frontier agents
+doing exactly that when it raises their reward). **Mica** is an optional companion daemon
+that makes those edits visible:
+
+- It runs as a separate, hidden system user (`_mica`) and polls `~/.claude/projects`,
+  `~/.codex/sessions`, and `~/.codex/archived_sessions` about once a second, copying every append into
+  `/Library/Mica`. Only `_mica` (or root) can write there; you and your agents can read.
+- Captured bytes are never rewritten. If a live transcript is truncated, rewritten, replaced, or
+  deleted, the daemon records a timestamped event and keeps the earlier capture intact, starting a new
+  capture from the file's new contents. Each capture is hash-chained (`python3 -m mica verify`).
+- Branches and forks are not flagged: Claude Code appends rewinds/edits to the same file, and a fork
+  or sub-agent is a new file. Codex archiving a rollout is recognized as a move. Every captured
+  transcript deletion stays flagged, including old transcripts removed by retention cleanup.
+  Mica does not use retention settings to suppress warnings: those settings are agent-writable,
+  and a file's age cannot establish who deleted it.
+
+In the viewer, flagged sessions carry a red tag (**truncated**, **rewritten**, **replaced**,
+**deleted**, **recreated**, **access lost**), the sidebar shows the daemon's status with a "⚠ N flagged" filter, and each
+transcript gets a banner comparing it with its capture, with links to open every earlier capture
+and every event Mica recorded for it; a transcript with recorded events but no flags (say, a Codex
+archive move) gets a neutral banner listing them. The viewer shows the store as recorded: every flag the daemon
+set (including any it has no label for), and every captured transcript, so one the live list doesn't
+show (deleted, unreadable, or unparseable) is listed from Mica's copy. Store-wide gaps (a whole
+folder unreadable, a file Mica could never open) appear as "N gaps" in the sidebar status, and a
+store it can't read shows as an error there. Downtime gaps aren't shown in the viewer;
+`python3 -m mica flagged` lists them. Without Mica installed, none of this appears. The viewer is
+your repo's code, so an agent can edit it; when it matters, check with `python3 -m mica flagged` or
+read `/Library/Mica` directly.
+
+Sleep needs nothing special: the daemon pauses and resumes with everything else. After a restart,
+launchd starts it again and it records a store-wide `capture_gap` for the downtime (not a flag), then
+re-compares every file that changed while it was stopped.
+
+**Install** (macOS, once; afterwards launchd starts it at every boot with no password). Run from this
+repo's folder, so Python finds the `mica` package:
+
+```bash
+cd cc_transcript_viewer
+sudo /usr/bin/python3 -m mica install --dry-run   # print every step first
+sudo /usr/bin/python3 -m mica install
+sudo /usr/bin/python3 -m mica install --reinstall          # update an install; keeps the captures
+sudo /usr/bin/python3 -m mica install --reinstall --reset  # same, but deletes every capture first
+python3 -m mica status                            # running? how many captured / flagged?
+python3 -m mica flagged                           # flagged transcripts with their events, and store-wide gaps
+sudo /usr/bin/python3 -m mica uninstall           # keeps the captures unless --delete-store
+```
+
+Install creates the `_mica` user, copies the daemon to `/usr/local/libexec/mica` (owned by
+root), and grants read-only ACL entries (`ls -le` shows them) on the transcript folders plus
+pass-through "search" on the folders above them. It uses Apple's `/usr/bin/python3` with `-I`, and
+refuses any interpreter or install location an agent could modify. Review `git diff` before running it
+with sudo: you're running this repo's code as root.
+
+**What it does and doesn't protect.** It protects everything captured *before* an agent acts: an agent
+without your sudo password can't alter or delete the store, stop the daemon, or edit its code. Keep it
+that way (no `NOPASSWD` sudo; be wary of an agent asking you to run a `sudo` command). It can't:
+
+- catch content written and erased between two polls (~1 s);
+- make spoofed tool output honest (if an agent rigs its shell, the transcript faithfully records fake
+  results);
+- keep capturing after an agent removes the ACL entries (earlier captures stay safe, affected
+  transcripts stay flagged even after access returns, and source access failures appear in the sidebar);
+- see sessions from before it was installed, or Cursor/opencode sessions (SQLite stores, not
+  append-only files).
+
+A deep edit far from the end of a large file is always preserved (the original bytes are already
+captured) but may be reported up to a minute later, when the periodic full comparison runs.
+
+Mica refuses symlinked transcript files and folders, including folders redirected after capture
+starts or while the daemon is stopped. It records lost access and keeps earlier captures; restoring
+the real folder lets capture resume. A transcript Mica could not read stays flagged **access lost**,
+and its banner shows when access was lost and when it returned (the whole file is re-compared then). This prevents symlink redirection, but an agent can still append
+fabricated messages directly: matching a capture verifies the saved bytes, not who wrote them.
+
+`python3 -m mica daemon --store DIR` runs the same capture loop as you, for trying it out; it
+offers no protection from agents. `python server.py --mica DIR` points the viewer at any Mica store, and
+`--no-mica` turns the feature off.
 
 ## Notes on Codex transcripts
 
-- **Reasoning summaries.** Codex doesn't save raw chain-of-thought in readable form for OpenAI
-  models, but it can save readable summaries when configured. To request them for future sessions,
-  add to `~/.codex/config.toml`:
-
-  ```toml
-  model_reasoning_summary = "detailed"
-  ```
-
-  This doesn't backfill old transcripts. Encrypted-only reasoning records contain no displayable
-  text and are omitted; readable duplicates (written as both `event_msg/agent_reasoning` and
+- **Reasoning summaries.** Readable summaries only exist if you set
+  `model_reasoning_summary = "detailed"` (see [Do this
+  first](#do-this-first-two-settings-that-cant-backfill)), and setting it doesn't backfill old
+  transcripts. Encrypted-only reasoning records contain no displayable text and are omitted;
+  readable duplicates (written as both `event_msg/agent_reasoning` and
   `response_item/reasoning.summary`) are grouped and deduped.
 - **Web search results aren't stored.** Codex records only the search *queries* it issued (the viewer
   lists all of them); the fetched pages are sent to the model but never written to the rollout. The
@@ -232,59 +411,100 @@ Cursor has two product surfaces with different canonical stores; the viewer read
   old/new strings directly in the tool call.
 - **Thinking** where recorded (IDE bubble thinking text; CLI `reasoning` blocks — often signature-only).
 
-## Requirements
+## Exporting Cursor GPT sessions as Codex rollouts
 
-- **Python 3.9+** (standard library only — no `pip install` needed).
-- Markdown / math rendering uses `marked.js`, `DOMPurify`, and `KaTeX` from a CDN; offline, it falls
-  back to plain text.
-
-## Install
+`codex_export/cursor_to_codex.py` converts Cursor's GPT conversations into the Codex rollout JSONL format
+(`~/.codex/sessions/**/rollout-*.jsonl`), so Cursor turns can be read — or replayed — by anything
+that already speaks Codex:
 
 ```bash
-git clone https://github.com/tim-hua-01/cc_transcript_viewer.git
-cd cc_transcript_viewer
+python3 codex_export/cursor_to_codex.py --list                     # matching sessions, one per line
+python3 codex_export/cursor_to_codex.py --out ~/cursor-rollouts    # YYYY/MM/DD/rollout-<time>-<id>.jsonl
+python3 codex_export/cursor_to_codex.py --session <composer-id> --out -   # one session to stdout
 ```
 
-## Important: keep your transcripts around
+The rendered bubbles are *not* the source here. Cursor also keeps the exact provider-format message
+array it sends to OpenAI, content-addressed: `composerData:<id>.conversationState` is a protobuf of
+32-byte sha256s, each addressing an `agentKv:blob:<sha256>` row holding one message. In those blobs
+reasoning is intact — the `rs_…` id and the `gAAAAA…` `encrypted_content` live in a JSON-encoded
+`signature` (the bubbles' `thinking.signature` is always empty) — so `response_item` reasoning
+records come out with a real `summary` *and* `encrypted_content`.
 
-By default **Claude Code deletes chat transcripts after 30 days**, so this viewer can only show what
-hasn't been cleaned up yet. To retain them, edit your global settings at `~/.claude/settings.json`
-and add:
+Mapping: Cursor's system prompt → `session_meta.base_instructions`; each prompt → `turn_context` +
+`message` + a `user_message` mirror; `tool-call` → `function_call` (Cursor's `call_…\nfc_…` id is
+split into `call_id`/`id`); `tool-result` → `function_call_output`. Tool *names* stay Cursor's
+(`ReadFile`, `ApplyPatch`, …) rather than being renamed to Codex's.
 
-```jsonc
-{
-  // Days to keep transcripts before automatic cleanup (default: 30).
-  // A large value effectively keeps them forever (~274 years here).
-  "cleanupPeriodDays": 99999,
+Caveats: `conversationState` is the live context window, so a compacted thread has lost its oldest
+turns there (the export prints how many; the bubbles still have that text, minus the encrypted
+reasoning). Only bubbles carry timestamps, so times are exact for prompts and for tool calls in
+newer composers and carried forward otherwise. Non-GPT models store an opaque signature instead of
+an OpenAI reasoning item; `--all-models` exports them anyway, putting that string in
+`encrypted_content`.
 
-  // Optional but recommended: persist human-readable thinking summaries.
-  // Without this, Claude Code stores only an encrypted signature for thinking
-  // blocks, so they show up empty in the viewer. With it on, NEW sessions save
-  // a readable summary the viewer can display. (It can't backfill old sessions.)
-  "showThinkingSummaries": true
-}
+## Exporting opencode sessions as Codex rollouts
+
+`codex_export/opencode_to_codex.py` does the same for opencode. opencode's own database already holds a complete
+transcript, so unlike the Cursor exporter this is a format conversion rather than a recovery
+operation — what it buys you is that Codex-aware tooling can read the session, and that the
+provider's **encrypted reasoning travels with it**:
+
+```bash
+python3 codex_export/opencode_to_codex.py --list                       # sessions + their reasoning format
+python3 codex_export/opencode_to_codex.py --out ~/opencode-rollouts    # YYYY/MM/DD/rollout-<time>-<id>.jsonl
+python3 codex_export/opencode_to_codex.py --session <session-id> --out -    # one session to stdout
+python3 codex_export/opencode_to_codex.py --with-encrypted --out DIR   # only sessions that carry blobs
 ```
 
-Restart Claude Code (or run `/config` once) for the change to take effect. Note this only stops
-*future* deletion — anything already cleaned up is gone.
+The reasoning sits inline on the part, in `metadata.<providerID>.reasoning_details`: alongside the
+token-by-token summary fragments is a `reasoning.encrypted` entry with an `rs_…` id and opaque
+`data`. That maps 1:1 onto a Codex `reasoning` response_item — `summary[0].summary_text` plus
+`encrypted_content` — with no blob chain to chase, unlike Cursor.
+
+**The blobs are not necessarily OpenAI's.** Codex rollouts carry OpenAI Responses-API reasoning
+items, but opencode records whatever its provider returned and stamps the shape in `format`. Grok
+through OpenRouter writes `xai-responses-v1`: a faithful record, but *not* replayable against the
+OpenAI Responses API. The formats found are printed on export and stored in
+`session_meta.opencode.reasoning_formats` so an export can't be mistaken for an OpenAI-replayable
+one.
+
+Mapping: the session → `session_meta`; each user turn → `turn_context` + `message` + a
+`user_message` mirror; assistant text → `message` + an `agent_message` mirror; each tool part →
+`function_call` **and** `function_call_output`, since opencode fuses the call and its result into
+one record where Codex keeps two. Tool names and arguments stay opencode's own (`read`/`filePath`)
+rather than being renamed. Every part carries its own clock, so timestamps are exact rather than
+inferred. A call with no result (interrupted, or still running) emits the call alone and is
+reported.
 
 ## How it works
 
 | File | Role |
 |------|------|
-| `server.py` | The unified stdlib HTTP layer plus everything that spans sources: merges the three parsers' session lists into one time-sorted sidebar list, dispatches `/api/session` to the right parser by transcript root / `cursordb:`/`cursorcli:` scheme, runs full-text search, owns custom names and summary-cache persistence, and serves the JSON API (`/api/sessions`, `/api/session?file=...`, `/api/session-name`, `/api/search?q=...`, `/api/local-image`) plus the static frontend. `/api/session` only serves files under the allowed roots; `/api/session-name` only updates the viewer-owned names file; `/api/local-image` serves only image-typed files; and a `Host`-header allowlist guards the loopback server against DNS rebinding. |
+| `server.py` | The unified stdlib HTTP layer plus everything that spans sources: merges the parsers' session lists into one time-sorted sidebar list, dispatches `/api/session` to the right parser by transcript root / `cursordb:`/`cursorcli:`/`opencode:` scheme, runs full-text search, owns custom names and summary-cache persistence, and serves the JSON API (`/api/sessions`, `/api/session?file=...`, `/api/mica-compare?file=...`, `/api/session-state?file=...`, `/api/session-name`, `/api/search?q=...`, `/api/local-image`, `/api/export?file=...`, `/api/open-local`, `/api/reveal-transcript`) plus the static frontend. `/api/session` only serves files under the allowed roots; `/api/session-name` only updates the viewer-owned names file; `/api/local-image` serves only image-typed files; and a `Host`-header allowlist guards the loopback server against DNS rebinding. |
 | `claude_parser.py` | Claude Code parsing library (imported by `server.py`): parses session JSONL into a clean event stream (pairing tool results to calls), detects system-injected "user" records, folds rewound/edited branches into collapsible markers, labels sub-agents from their spawning `Task`/`Agent` calls, and builds sidebar summaries (cold scans use a process pool). Call `configure(projects_dir)` to point it elsewhere. |
 | `codex_parser.py` | Codex parsing library: parses rollout JSONL, reads `state_5.sqlite` metadata, pairs tool calls with outputs, unpacks orchestration-style `exec` calls, correlates local and embedded prompt images, consolidates per-turn bookkeeping, recognizes guardian/sub-agent relationships, and renders `apply_patch` diffs. Call `configure(codex_home)` to point it elsewhere. |
 | `cursor_parser.py` | Cursor parsing library: reads IDE `state.vscdb`; reads CLI `~/.cursor/chats/.../store.db` (with JSONL fallback under `agent-transcripts`); normalizes tool names/inputs; reconstructs IDE `edit_file` diffs; decodes grep/glob results out of Cursor's binary protobuf tool records (`toolCallBinary`) since newer Cursor versions no longer store them as JSON; emits Claude-shaped events. IDE uses `cursordb:<id>`; CLI store uses `cursorcli:<id>`. Call `configure(db_path, projects_dir=…, chats_dir=…)` to retarget. |
 | `cursor_binary.py` | Decoder for Cursor's `toolCallBinary` protobuf records (wire-format only, no schema/dependency): exact grep and glob result reconstruction, plus a generic best-effort string recovery for any other completed call whose result was never written to JSON (e.g. `await`). |
-| `common.py` | Helpers shared by the three parsers: JSONL iteration, title truncation, timestamp conversion, and the thread-safe fingerprint-keyed `SummaryCache` all of them use. |
+| `opencode_parser.py` | opencode parsing library: reads the single SQLite database at `~/.local/share/opencode/opencode.db` (`session` / `message` / `part` tables), folds each message's parts into block-shaped events, attaches each tool part's own result, renames opencode's camelCase tool arguments onto the canonical names, links `task` calls to the sub-agent session they spawned, flags thinking whose real reasoning came back encrypted, and drops the per-token provider `reasoning_details` noise. Sessions are addressed as `opencode:<id>`; the list cache is keyed on the database *and* its write-ahead log, so a live session is not served stale. Call `configure(db_path)` to retarget. |
+| `codex_export/cursor_to_codex.py` | Exports Cursor's GPT conversations as Codex rollout JSONL by walking the provider-format message blobs behind `conversationState` (where the real `rs_…` ids and `encrypted_content` live), rather than the rendered bubbles. See [Exporting Cursor GPT sessions](#exporting-cursor-gpt-sessions-as-codex-rollouts). |
+| `codex_export/opencode_to_codex.py` | Exports opencode sessions as Codex rollout JSONL, carrying the provider's encrypted reasoning (`reasoning.encrypted` → `encrypted_content`) and splitting opencode's fused tool record into Codex's separate `function_call` / `function_call_output`. Records the provider's reasoning `format` so a non-OpenAI blob isn't mistaken for a replayable one. |
+| `codex_export/codex_rollout.py` | The parts of writing a Codex rollout that aren't specific to any source — record shape, `rollout-<time>-<id>.jsonl` naming, dated output layout — shared by both exporters so they can't drift. |
+| `export_html.py` | Bundles one parsed session into a self-contained HTML file for `/api/export`: inlines `static/style.css` and `static/app.js` into `static/index.html`, embeds the session as a JSON literal, and re-embeds locally-referenced images as `data:` URIs under a per-image and whole-file size budget. Deliberately has no renderer of its own — the saved page runs the same `app.js`, which detects the embedded payload and switches to standalone mode. |
+| `mica/` | The optional [Mica](#optional-tamper-resistant-backups-mica): `capture.py` (the polling daemon that copies appends into append-only, hash-chained generations and records tamper events), `store.py` (the on-disk format and the read-only `StoreReader` the viewer uses to badge sessions, list deleted ones, and compare a live file with its capture), `install.py` (macOS `_mica` user, root-owned install, ACLs, LaunchDaemon), and `__main__.py` (`python3 -m mica daemon/status/flagged/verify/install/uninstall`). Standard library only, Python 3.9-compatible so it runs on Apple's root-owned interpreter. |
+| `common.py` | Everything the four parsers share: JSONL iteration, JSON/SQLite access, title truncation, timestamp conversion, the sidebar-summary shape (`make_summary`), and the thread-safe fingerprint-keyed `SummaryCache` (plus its `cached_summary` wrapper) all of them use. |
 | `event_schema.py` | The written-down (and machine-checked) event contract between the parsers and the frontend: every event kind, both message shapes, and validators the test suite runs over every parser's output. |
-| `static/index.html`, `static/style.css`, `static/app.js` | The single frontend (vanilla JS, no build step). `app.js` dispatches on event kind and renders the Claude Code / Cursor (block-based) and Codex (flat) shapes, and runs the always-on live-refresh poll loop. CDN assets (marked, DOMPurify, KaTeX) are version-pinned with SRI integrity hashes. |
-| `test_security.py` | Zero-dependency security tests (`python3 -m unittest test_security`): asserts no outbound connections at runtime, no network-client imports, loopback default bind, the `Host`-header rebinding guard, that `/api/session` is confined to the transcript roots while `/api/local-image` serves images only, and that every CDN asset is version-pinned and SRI-hashed. |
-| `test_parsers.py` | Characterization tests for the parser internals: branch folding, the Codex JS-literal orchestration parser, Cursor blob/JSON extraction and diff reconstruction, queued prompts with images. |
-| `test_event_schema.py` | Conformance tests: every parser's summaries and full parses must satisfy `event_schema.py`, and `app.js` must dispatch on every declared kind. |
-| `test_summary_cache.py` | Summary-cache unit tests (round-trip persistence, fingerprint invalidation, dirty-flag races). |
-| `test_fixtures.py` | Shared fixture builders that write minimal-but-valid transcripts for each source. |
+| `static/index.html`, `static/style.css`, `static/app.js` | The single frontend (vanilla JS, no build step). `app.js` dispatches on event kind and renders the Claude Code / Cursor / opencode (block-based) and Codex (flat) shapes, and runs the always-on live-refresh poll loop. When `window.__TRANSCRIPT_EXPORT__` is present (a saved single-file transcript) it renders that session directly and disables everything that needs the server. CDN assets (marked, DOMPurify, KaTeX) are version-pinned with SRI integrity hashes. |
+| `tests/test_security.py` | Zero-dependency security tests (`python3 -m unittest tests.test_security`): asserts no outbound connections at runtime, no network-client imports, loopback default bind, the `Host`-header rebinding guard, that `/api/session` is confined to the transcript roots while `/api/local-image` serves images only, and that every CDN asset is version-pinned and SRI-hashed. |
+| `tests/test_export.py` | Tests for the single-file export: the document inlines its assets and points at no server, transcript text can't break out of the embedded JSON, local images become `data:` URIs (and degrade to a note when missing, oversized, or not an image), and `/api/export` enforces the same path allowlist as `/api/session`. |
+| `tests/test_frontend_browser.py` | Optional Chrome/Chromium journeys: the real standalone frontend (transcript rendering, server-only controls, offline behavior, Copy All), and the live page against a scripted API (dismissing and re-showing the settings banner across polls, a Mica capture failure in the sidebar, and an access-lost transcript's gap). It skips when no supported browser is installed. |
+| `tests/test_server.py` | Custom names and title-weighted search, plus cross-source ordering tests: parsed last activity wins over a misleading file mtime, sub-agents remain beside their parent, and malformed or missing activity falls back to mtime. |
+| `tests/test_cursor_to_codex.py`, `tests/test_opencode_to_codex.py` | Exporter tests: encrypted reasoning and tool records survive conversion, timestamps remain attached to the right records, and the output reparses through `codex_parser`. |
+| `tests/test_claude_parser.py`, `tests/test_codex_parser.py`, `tests/test_cursor_parser.py`, `tests/test_opencode_parser.py` | Characterization tests for each parser's internals — branch folding and queued prompts (Claude), the JS-literal orchestration parser (Codex), blob/JSON extraction and diff reconstruction (Cursor), and the part→event mapping (opencode). |
+| `tests/test_event_schema.py` | Conformance tests: every parser's summaries and full parses must satisfy `event_schema.py`, and `app.js` must dispatch on every declared kind. |
+| `tests/test_golden_transcripts.py`, `tests/fixtures/` | Regression tests over checked-in, fictional transcript files whose field shapes were compared with current local stores. The fixture README records the sanitization and review rules. |
+| `tests/test_summary_cache.py`, `tests/test_common.py` | Unit tests for the shared layer: summary-cache round-trip persistence, fingerprint invalidation and dirty-flag races, plus the small helpers in `common.py`. |
+| `tests/test_mica.py` | Mica tests with a fake clock: appends, truncation, emptied files, near-end and deep rewrites, atomic replacements, deletions (flagged regardless of age or retention settings), delete-then-recreate, Codex archive moves, forks and in-file branches (not flagged), offline changes, lost access (flagged with a recorded start and end, not a deletion), symlinks, crash recovery, hash-chain verification, the viewer's badges/copies/compare endpoint (and that it never writes to the store), and the installer's plan (which stops a running daemon before re-granting access). |
+| `tests/fixture_builders.py` | Shared fixture builders that write temporary minimal-but-valid transcripts and databases for each source, and `ViewerServerTestCase`, a live loopback server over those fixtures. |
 
 ### Transcript format notes
 
@@ -333,6 +553,32 @@ A lossy JSONL export also exists at
 (`text` + `tool_use` only). The viewer uses it only when no `store.db` is present for that UUID.
 Project folder names encode the cwd by replacing `/` and `_` with `-`; cwd for `store.db` sessions
 usually comes from `meta.json` instead.
+
+opencode keeps everything in one SQLite database at `~/.local/share/opencode/opencode.db` — there
+are no per-session files, so sessions are addressed by the synthetic id `opencode:<sessionID>`:
+
+- `session` — one row per conversation: `title`, `directory`, `version`, `agent`, `model`, cost and
+  token totals, and `parent_id`, which is set on the sub-agent sessions the `task` tool spawns.
+- `message` — one row per turn; the `data` column is the JSON message record, either
+  `role: "user"` or `role: "assistant"` (which also carries `modelID`/`providerID`, `cost`,
+  `tokens`, `finish` and any turn-level `error`).
+- `part` — the actual content, one row per part, `data` holding a union discriminated on `type`:
+  `text` (with `synthetic`/`ignored` flags), `reasoning`, `tool`, `file`, `agent`, `subtask`,
+  `step-start`, `step-finish`, `snapshot`, `patch`, `retry`, `compaction`.
+
+Tool calls live on the assistant turn — a `tool` part carries its own result in
+`state` (`pending` / `running` / `completed` / `error`) — so opencode maps onto the same block
+shape as Claude Code and Cursor rather than Codex's flat shape.
+
+Parts also carry a per-provider `metadata` blob holding a `reasoning_details` list. Most of it is
+a token-by-token copy of the summary that dwarfs the text itself, so the parser reads only what it
+renders — but the list also holds any `reasoning.encrypted` entry, an `rs_…` id plus opaque `data`
+only the provider can read. When one is present the visible thinking is a *summary* of a chain of
+thought the transcript doesn't contain, and the viewer labels it as such. Unlike Cursor, opencode
+keeps this inline on the part rather than in an out-of-line blob chain.
+
+The database runs in WAL mode, so change detection has to watch `opencode.db-wal` as well as the
+main file.
 
 ## License
 

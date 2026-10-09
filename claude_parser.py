@@ -30,6 +30,26 @@ PROJECTS_DIR = DEFAULT_PROJECTS_DIR
 SUMMARY_CACHE = common.SummaryCache()
 _PARALLEL_SCAN_THRESHOLD = 32
 
+# Record types the transcript deliberately does not render: session-level
+# bookkeeping with no conversational content, plus the title/branch records
+# the event loop consumes earlier (listed again here so a degenerate one with
+# an empty field stays quiet too). Anything not handled and not listed is
+# surfaced as a raw card, so a Claude Code format change shows up in the
+# transcript instead of vanishing.
+_IGNORED_RECORD_TYPES = frozenset({
+    "atis-latch",           # opaque session token
+    "bridge-session",       # cloud-session bridging pointer
+    "cost-state",           # running cost/usage totals
+    "file-history-delta",   # file-backup bookkeeping for /rewind
+    "mode",                 # mode-change notices (plan/normal/…)
+    "queue-operation",      # queued-prompt bookkeeping; content re-enters as
+                            # attachments/user turns when dequeued
+    "summary",              # legacy compact-summary title pointers
+    # consumed earlier in the loop:
+    "agent-name", "ai-title", "custom-title", "last-prompt",
+    "permission-mode", "pr-link", "file-history-snapshot",
+})
+
 
 def configure(projects_dir: Path) -> None:
     """Point the module at a Claude Code projects directory."""
@@ -70,19 +90,7 @@ _SYNTHETIC_USER_LABELS = {
 }
 
 
-def _content_text(content) -> str:
-    """Concatenated text of a user-message content (a string or a block list).
-    Ignores images and tool-result blocks; returns '' when there is no text."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [
-            b.get("text") or ""
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        ]
-        return "\n".join(p for p in parts if p)
-    return ""
+_content_text = common.content_text
 
 
 def _user_record_text(rec: dict) -> str:
@@ -281,17 +289,10 @@ def _prefill_summaries(files: list[Path]) -> None:
 
 def session_summary(path: Path) -> dict:
     """Lightweight metadata for a Claude Code session, cached by file identity."""
-    key = str(path)
-    identity = common.file_identity(path)
-    if identity is not None:
-        cached = SUMMARY_CACHE.get(key, identity)
-        if cached is not None:
-            return cached
-
-    summary = _session_summary_uncached(path)
-    if identity is not None:
-        SUMMARY_CACHE.put(key, identity, summary)
-    return summary
+    return common.cached_summary(
+        SUMMARY_CACHE, str(path), common.file_identity(path),
+        lambda: _session_summary_uncached(path),
+    )
 
 
 def _session_summary_uncached(path: Path) -> dict:
@@ -358,34 +359,33 @@ def _session_summary_uncached(path: Path) -> dict:
     else:
         cwd = cwd or decode_project_name(path.parent.name)
 
-    summary = {
-        "agent": "claude",
-        "id": path.stem,
-        "file": str(path),
-        "title": claude_title
+    st = common.safe_stat(path)
+    summary = common.make_summary(
+        agent="claude",
+        id=path.stem,
+        file=str(path),
+        title=claude_title
         or (sub_meta["title"] if sub_meta else "")
         or _first_user_text(records)
         or ai_title
         or "(untitled session)",
+        cwd=cwd,
+        git_branch=git_branch,
+        version=version,
+        first_ts=first_ts,
+        last_ts=last_ts,
+        n_user=n_user,
+        n_assistant=n_assistant,
+        n_tool=n_tool,
+        n_records=len(records),
+        model=sorted(models)[0] if models else "",
+        mtime=st.st_mtime if st else 0,
         # Latest Claude Code AI-generated session title (the one its /resume
         # picker shows); "" if none yet.
-        "ai_title": ai_title,
-        "claude_title": claude_title,
-        "agent_name": agent_name,
-        "cwd": cwd,
-        "git_branch": git_branch,
-        "version": version,
-        "first_ts": first_ts,
-        "last_ts": last_ts,
-        "n_user": n_user,
-        "n_assistant": n_assistant,
-        "n_tool": n_tool,
-        "n_web": 0,
-        "n_records": len(records),
-        "model": sorted(models)[0] if models else "",
-        "models": sorted(models),
-        "mtime": path.stat().st_mtime,
-    }
+        ai_title=ai_title,
+        claude_title=claude_title,
+        agent_name=agent_name,
+    )
     if sub_meta:
         summary.update({key: value for key, value in sub_meta.items() if key != "title"})
     return summary
@@ -461,9 +461,65 @@ def _notice_event(notice: dict, ts, is_sidechain: bool) -> dict:
 
 def _strip_event(ev: dict) -> dict:
     """Drop the internal branch-folding bookkeeping fields from an event."""
-    for k in ("_uuid", "_parent", "_idx"):
+    for k in ("_uuid", "_idx"):
         ev.pop(k, None)
     return ev
+
+
+def _turn_groups(records: list[dict]) -> dict:
+    """Map each record uuid to a *turn group* key.
+
+    Claude Code writes one record per assistant content block, all sharing
+    ``message.id``, and links tool results to the record holding the matching
+    ``tool_use`` rather than to the end of the message. With parallel tool calls
+    that makes the ``parentUuid`` tree branch inside a single turn (a tool_use
+    record gains both "next tool_use block" and "my result" as children), which
+    looks exactly like a rewind fork at the record level. The same happens with
+    per-result leaves: hook ``progress`` records, attachments (audience notes,
+    token reminders), meta user records (image expansions, skill injections).
+
+    Collapsing an assistant message, its tool results and everything appended
+    inside that turn into one node restores a tree whose forks are real
+    rewinds/edits. Only two things start a new group: an assistant record with
+    a fresh ``message.id`` and a real (non-meta, non-result) user prompt.
+    """
+    owner_by_tool_id: dict = {}
+    key: dict = {}
+    for r in records:
+        u = r.get("uuid")
+        if not u:
+            continue
+        msg = r.get("message") or {}
+        content = msg.get("content")
+        blocks = content if isinstance(content, list) else []
+        rtype = r.get("type")
+        if rtype == "assistant":
+            # No message id (synthetic records): a group of its own.
+            key[u] = ("m", msg["id"]) if msg.get("id") else ("a", u)
+            for b in blocks:
+                if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
+                    owner_by_tool_id[b["id"]] = key[u]
+            continue
+        # A queued user message typed while tools run is merged into the next
+        # result record, so any tool_result block makes it a result record.
+        results = [
+            b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_result"
+        ]
+        if results:
+            owners = {owner_by_tool_id.get(b.get("tool_use_id")) for b in results}
+            owners.discard(None)
+            if len(owners) == 1:
+                key[u] = owners.pop()
+                continue
+        elif rtype == "user" and not r.get("isMeta"):
+            key[u] = ("u", u)  # a human prompt always starts its own turn
+            continue
+        parent_group = key.get(r.get("parentUuid"))
+        if parent_group and parent_group[0] in ("m", "a"):
+            key[u] = parent_group
+        else:
+            key[u] = ("u", u)
+    return key
 
 
 def _fold_branches(records: list[dict], events: list[dict], active_leaf) -> list[dict]:
@@ -477,20 +533,41 @@ def _fold_branches(records: list[dict], events: list[dict], active_leaf) -> list
     leaf. We walk root→leaf and, at each fork on that path, bundle the abandoned
     sibling subtree(s) into one marker placed just before the active child.
 
+    The tree is taken over turn groups (see ``_turn_groups``) rather than raw
+    records, so the within-turn forks that parallel tool calls produce are not
+    mistaken for rewinds.
+
     Falls back to the unchanged flat list when there are no forks, the leaf is
     unusable, or the reconstructed path wouldn't cover every event (so we never
     silently drop content).
     """
-    children: dict = {}
     byu: dict = {}
-    idx_by_uuid: dict = {}
+    for r in records:
+        u = r.get("uuid")
+        if u and u not in byu:
+            byu[u] = r
+    if not byu:
+        return [_strip_event(e) for e in events]
+
+    group_of = _turn_groups(records)
+    # Group -> parent group, taken from the group's first-appended record; the
+    # first record of a group can't have its parent inside the same group.
+    parent_of: dict = {}
+    first_idx: dict = {}
     for i, r in enumerate(records):
         u = r.get("uuid")
-        if not u:
+        if not u or u not in group_of:
             continue
-        byu[u] = r
-        idx_by_uuid.setdefault(u, i)
-        children.setdefault(r.get("parentUuid"), []).append(u)
+        g = group_of[u]
+        if g in first_idx:
+            continue
+        first_idx[g] = i
+        pu = r.get("parentUuid")
+        parent_of[g] = group_of.get(pu) if pu in group_of else None
+
+    children: dict = {}
+    for g in first_idx:  # insertion order = file order
+        children.setdefault(parent_of[g], []).append(g)
 
     if not any(len(c) > 1 for c in children.values()):
         return [_strip_event(e) for e in events]
@@ -502,11 +579,9 @@ def _fold_branches(records: list[dict], events: list[dict], active_leaf) -> list
     if any(not e.get("_uuid") for e in events):
         return [_strip_event(e) for e in events]
 
-    if not active_leaf or active_leaf not in byu:
-        uuids = [r.get("uuid") for r in records if r.get("uuid")]
-        active_leaf = uuids[-1] if uuids else None
-    if not active_leaf:
-        return [_strip_event(e) for e in events]
+    if not active_leaf or active_leaf not in group_of:
+        active_leaf = next(reversed(byu))
+    leaf_group = group_of[active_leaf]
 
     # `last-prompt` points at the prompt's leaf, but the assistant reply (and any
     # tool results) are appended after it as descendants. Walk down to the real
@@ -514,23 +589,43 @@ def _fold_branches(records: list[dict], events: list[dict], active_leaf) -> list
     # away as an abandoned branch. At a fork the active continuation is always the
     # latest-appended child (a rewind abandons the old branch and appends a new
     # subtree after it).
-    node, guard = active_leaf, set()
+    node, guard = leaf_group, set()
     while node not in guard:
         guard.add(node)
         kids = children.get(node)
         if not kids:
             break
-        node = max(kids, key=lambda c: idx_by_uuid.get(c, -1))
-    active_leaf = node
+        node = max(kids, key=lambda c: first_idx.get(c, -1))
+    leaf_group = node
 
-    chain, seen, node = [], set(), active_leaf
-    while node in byu and node not in seen:
+    chain, seen, node = [], set(), leaf_group
+    while node in first_idx and node not in seen:
         seen.add(node)
         chain.append(node)
-        node = byu[node].get("parentUuid")
+        node = parent_of.get(node)
     chain.reverse()  # root → leaf
 
-    ev_by_uuid = {e["_uuid"]: e for e in events if e.get("_uuid")}
+    # Rewinding the first prompt creates sibling roots with parentUuid=null,
+    # rather than children of a shared message. Give those prompts a virtual
+    # parent so the same folding walk includes the abandoned conversations.
+    # Missing parents and compaction boundaries can also create roots, but
+    # don't establish a rewind: leave those to the coverage fallback below.
+    roots = children.get(None, [])
+    if len(roots) > 1 and all(
+        records[first_idx[g]].get("type") == "user"
+        and "parentUuid" in records[first_idx[g]]
+        and records[first_idx[g]]["parentUuid"] is None
+        and not records[first_idx[g]].get("isMeta")
+        and not records[first_idx[g]].get("isSidechain")
+        and g[0] == "u"
+        for g in roots
+    ):
+        chain.insert(0, None)
+
+    evs_by_group: dict = {}
+    for e in events:
+        g = group_of.get(e["_uuid"])
+        evs_by_group.setdefault(g, []).append(e)
 
     def subtree(root):
         out, stack = [], [root]
@@ -542,38 +637,39 @@ def _fold_branches(records: list[dict], events: list[dict], active_leaf) -> list
 
     new_events: list = []
     covered: set = set()
-    for i, u in enumerate(chain):
-        ev = ev_by_uuid.get(u)
-        if ev is not None:
-            new_events.append(ev)
-        covered.add(u)
+    for i, g in enumerate(chain):
+        own = evs_by_group.get(g, [])
+        new_events.extend(own)
+        covered.add(g)
         nxt = chain[i + 1] if i + 1 < len(chain) else None
         groups = []
-        for ab in (c for c in children.get(u, []) if c != nxt):
+        for ab in (c for c in children.get(g, []) if c != nxt):
             sub = subtree(ab)
             covered.update(sub)
             sub_evs = sorted(
-                (ev_by_uuid[x] for x in sub if x in ev_by_uuid),
+                (e for x in sub for e in evs_by_group.get(x, [])),
                 key=lambda e: e["_idx"],
             )
             if sub_evs:
-                groups.append([_strip_event(e) for e in sub_evs])
+                groups.append(sub_evs)
         if groups:
             new_events.append(
                 {
                     "kind": "branch",
-                    "ts": ev.get("ts") if ev else None,
+                    "ts": own[-1].get("ts") if own else None,
                     "groups": groups,
                     "count": sum(len(g) for g in groups),
                 }
             )
 
     # Safety net: if anything with an event wasn't placed, don't risk dropping
-    # it — return the flat list unchanged.
-    all_ev_uuids = {e["_uuid"] for e in events if e.get("_uuid")}
-    if not all_ev_uuids.issubset(covered):
+    # it — return the flat list unchanged. Checked before stripping, which
+    # mutates the shared event dicts.
+    if any(group_of.get(e["_uuid"]) not in covered for e in events):
         return [_strip_event(e) for e in events]
-    return [_strip_event(e) for e in new_events]
+    for e in events:
+        _strip_event(e)
+    return new_events
 
 
 def parse_session(path: Path) -> dict:
@@ -583,6 +679,7 @@ def parse_session(path: Path) -> dict:
     results_by_id: dict[str, dict] = {}
     tool_uses_by_id: dict[str, dict] = {}
     skill_instructions_by_id: dict[str, str] = {}
+    tool_id_by_result_uuid: dict[str, str] = {}
     for rec in records:
         content = rec.get("message", {}).get("content")
         if not isinstance(content, list):
@@ -602,6 +699,8 @@ def parse_session(path: Path) -> dict:
                         "images": norm["images"],
                         "structured": rec.get("toolUseResult"),
                     }
+                    if rec.get("uuid"):
+                        tool_id_by_result_uuid[rec["uuid"]] = tid
     for rec in records:
         source_id = rec.get("sourceToolUseID")
         source_tool = tool_uses_by_id.get(source_id, {})
@@ -615,12 +714,11 @@ def parse_session(path: Path) -> dict:
     meta = {}
     active_leaf = None
 
-    # Tag each emitted event with its record's uuid/parentUuid (and file order)
-    # so branch folding can reorganize them afterward. `rec` is read from the
-    # loop scope at call time.
+    # Tag each emitted event with its record's uuid (and file order) so branch
+    # folding can reorganize them afterward. `rec` is read from the loop scope
+    # at call time.
     def emit(ev):
         ev["_uuid"] = rec.get("uuid")
-        ev["_parent"] = rec.get("parentUuid")
         ev["_idx"] = len(events)
         events.append(ev)
 
@@ -660,6 +758,16 @@ def parse_session(path: Path) -> dict:
             meta["git_branch"] = rec["gitBranch"]
         if rec.get("version"):
             meta["version"] = rec["version"]
+
+        if t not in ("system", "attachment", "user", "assistant"):
+            if t not in _IGNORED_RECORD_TYPES:
+                # A record type this parser has never seen: surface it instead
+                # of dropping it silently, so a Claude Code format change is
+                # visible in the transcript rather than a quiet gap (the
+                # Codex 0.147 lesson).
+                emit({"kind": "raw", "ts": ts, "record_type": t,
+                      "payload": rec, "is_sidechain": is_sidechain})
+            continue
 
         if t == "system":
             ev = {
@@ -752,6 +860,15 @@ def parse_session(path: Path) -> dict:
         if t == "user":
             blocks, has_content = _content_blocks(rec.get("message", {}).get("content"))
             if not has_content:
+                continue
+            # An image tool result is followed by a meta "companion" record
+            # carrying its "[Image: original WxH, ...]" caption. It belongs to
+            # that result, not to the conversation.
+            companion_tid = tool_id_by_result_uuid.get(rec.get("parentUuid"))
+            if rec.get("isMeta") and rec.get("turnCompanion") and companion_tid:
+                results_by_id[companion_tid].setdefault("image_notes", []).append(
+                    _user_record_text(rec)
+                )
                 continue
             # Claude Code injects a selected skill's instructions as an isMeta
             # user record. It is model context, not something the user typed.

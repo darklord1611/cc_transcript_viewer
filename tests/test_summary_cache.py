@@ -1,4 +1,4 @@
-"""Focused tests for persistent transcript summary caching."""
+"""Focused regression tests for persistent transcript summary caching."""
 
 from __future__ import annotations
 
@@ -81,10 +81,12 @@ class SummaryCacheTests(unittest.TestCase):
             "payload": {"id": "test-id"},
         }) + "\n", encoding="utf-8")
 
-        first = codex.session_summary(path, {"title": "first"})
-        second = codex.session_summary(path, {"title": "second"})
+        first = codex.session_summary(path, {"title": "first", "name": "short one"})
+        second = codex.session_summary(path, {"title": "second", "name": "short two"})
         self.assertEqual(first["title"], "first")
         self.assertEqual(second["title"], "second")
+        self.assertEqual(first["ai_title"], "short one")
+        self.assertEqual(second["ai_title"], "short two")
 
     def test_dirty_flag_clears_only_when_no_concurrent_update(self):
         cache = common.SummaryCache()
@@ -113,6 +115,21 @@ class SummaryCacheTests(unittest.TestCase):
         self.assertIsNone(cache.get("good", (1, 3)))  # fingerprint mismatch
         self.assertIsNone(cache.get("bad-shape", (1, 2)))
         self.assertIsNone(cache.get("bad-types", (1, 2)))
+
+
+    def test_save_merges_with_entries_from_other_processes(self):
+        """Several viewer processes share the cache file; one process's save
+        must not discard entries another process computed."""
+        claude.SUMMARY_CACHE.put("/theirs/session.jsonl", [1, 2], {"title": "theirs"})
+        server.save_summary_caches()
+
+        claude.SUMMARY_CACHE.clear()
+        claude.SUMMARY_CACHE.put("/ours/session.jsonl", [3, 4], {"title": "ours"})
+        server.save_summary_caches()
+
+        payload = json.loads(server.CACHE_FILE.read_text(encoding="utf-8"))
+        self.assertIn("/theirs/session.jsonl", payload["claude"])
+        self.assertIn("/ours/session.jsonl", payload["claude"])
 
 
 if __name__ == "__main__":

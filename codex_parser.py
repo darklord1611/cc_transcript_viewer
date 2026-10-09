@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Codex transcript parsing library.
 
-Reads Codex session transcripts stored under ~/.codex/sessions. This module is
-imported by server.py (the unified Claude Code + Codex transcript browser); it
-exposes list_sessions() / parse_session() and the helpers they need.
+Reads Codex rollout JSONL under ~/.codex/sessions and ~/.codex/archived_sessions,
+plus thread metadata from ~/.codex/state_5.sqlite when present. This module is
+imported by server.py (the unified transcript browser); it exposes
+list_sessions() / parse_session() and the helpers they need.
 
 Call configure(codex_home) once at startup to point it at a Codex home other
 than the default ~/.codex.
@@ -15,6 +16,7 @@ import json
 import mimetypes
 import re
 import sqlite3
+from collections import Counter
 from pathlib import Path
 from urllib.parse import quote
 
@@ -45,7 +47,7 @@ def _thread_signature(thread_row: dict | None) -> str:
     """Stable fingerprint for SQLite metadata that can change without the JSONL."""
     row = thread_row or {}
     fields = (
-        "id", "title", "preview", "cwd", "updated_at", "updated_at_ms",
+        "id", "title", "name", "preview", "cwd", "updated_at", "updated_at_ms",
         "created_at", "created_at_ms", "archived", "model", "reasoning_effort",
         "tokens_used", "source", "thread_source", "cli_version", "model_provider",
     )
@@ -337,13 +339,132 @@ def _base_instructions_text(value) -> str:
     return ""
 
 
+def _item_text(item: dict) -> str:
+    """Concatenated text of a Codex ≥0.147 ``item_completed`` message item.
+
+    Takes the ``text`` string of every content block that has one (observed
+    block type tags vary: ``text``/``Text``); blocks without text are ignored.
+    """
+    return "\n".join(
+        block["text"]
+        for block in item.get("content") or []
+        if isinstance(block, dict) and isinstance(block.get("text"), str) and block["text"]
+    )
+
+
+def _item_text_elements(item: dict) -> list:
+    """Flattened ``text_elements`` of an ``item_completed`` message's content
+    blocks — the envelope keeps them per block, the mirror kept one list."""
+    return [
+        element
+        for block in item.get("content") or []
+        if isinstance(block, dict)
+        for element in block.get("text_elements") or []
+    ]
+
+
+def _completed_message_item(rec: dict) -> tuple[str, dict] | None:
+    """(item_type, item) when a record is an ``item_completed`` envelope for a
+    user or agent message; None otherwise. Codex ≥0.147 stopped writing the
+    ``user_message``/``agent_message`` event mirrors and wraps every finished
+    item in this envelope instead."""
+    if rec.get("type") != "event_msg":
+        return None
+    payload = rec.get("payload") or {}
+    if payload.get("type") != "item_completed":
+        return None
+    item = payload.get("item") or {}
+    itype = item.get("type")
+    if itype in ("UserMessage", "AgentMessage"):
+        return itype, item
+    return None
+
+
+def _record_message(rec: dict) -> tuple[str, str, str, dict] | None:
+    """(role, text, source, data) when a record carries a conversational
+    message, else None. ``role`` is "user"/"assistant"; ``source`` is "mirror"
+    (the pre-0.147 ``user_message``/``agent_message`` event) or "envelope"
+    (the ≥0.147 ``item_completed`` item); ``data`` is the payload or item the
+    per-message extras (images, phase, …) live on.
+
+    This is the one place that knows every on-disk shape a Codex message
+    takes. The summary counter, the session title, the prescan, and the event
+    loop all classify through it, so the next format change is taught here
+    once — not in four hand-synchronized type chains, which is how the 0.147
+    change slipped through.
+    """
+    if rec.get("type") != "event_msg":
+        return None
+    payload = rec.get("payload") or {}
+    pt = payload.get("type")
+    if pt == "user_message":
+        return "user", payload.get("message") or "", "mirror", payload
+    if pt == "agent_message":
+        return "assistant", payload.get("message") or "", "mirror", payload
+    completed = _completed_message_item(rec)
+    if completed is not None:
+        itype, item = completed
+        role = "user" if itype == "UserMessage" else "assistant"
+        return role, _item_text(item), "envelope", item
+    return None
+
+
+def _normalized_message_key(text) -> str:
+    return " ".join(str(text).split())
+
+
+def _mirror_message_counts(records: list[dict]) -> tuple[Counter, Counter]:
+    """Multisets of normalized (user, agent) message texts that appear as
+    pre-0.147 ``event_msg`` mirrors.
+
+    A rollout can carry a message both ways — as a mirror and inside an
+    ``item_completed`` envelope (a session resumed across the 0.147 upgrade
+    mixes eras within one file). The parse loop and the summary counter charge
+    each envelope message against these multisets first, so a message renders
+    and counts exactly once regardless of which formats the file contains.
+    """
+    users: Counter = Counter()
+    agents: Counter = Counter()
+    for rec in records:
+        msg = _record_message(rec)
+        if msg is not None and msg[2] == "mirror":
+            counter = users if msg[0] == "user" else agents
+            counter[_normalized_message_key(msg[1])] += 1
+    return users, agents
+
+
+# event_msg subtypes the transcript deliberately does not render: transient
+# streaming deltas and begin/progress halves whose finished counterpart is
+# rendered from another record, plus bookkeeping with no conversational
+# content. Anything NOT listed here (and not handled in the parse loop) is
+# surfaced as a raw card — 0.147's item_completed messages went unnoticed for
+# days precisely because unknown event_msg records used to vanish silently.
+_IGNORED_EVENT_MSG_TYPES = frozenset({
+    "agent_message_delta",
+    "agent_reasoning_delta",
+    "agent_reasoning_raw_content",
+    "agent_reasoning_raw_content_delta",
+    "agent_reasoning_section_break",
+    "context_compacted",       # rendered from the top-level `compacted` record
+    "exec_command_begin",
+    "exec_command_end",        # rendered from response_item function calls
+    "exec_command_output_delta",
+    "mcp_tool_call_begin",
+    "mcp_tool_call_end",       # rendered from response_item tool calls
+    "patch_apply_begin",
+    "patch_apply_end",         # consumed by the prescan into patch results
+    "session_configured",
+    "thread_rolled_back",
+    "thread_settings_applied",
+    "turn_diff",
+})
+
+
 def _first_user_message(records: list[dict]) -> str:
     for rec in records:
-        if rec.get("type") != "event_msg":
-            continue
-        payload = rec.get("payload") or {}
-        if payload.get("type") == "user_message" and payload.get("message"):
-            return common.short_title(str(payload["message"]))
+        msg = _record_message(rec)
+        if msg is not None and msg[0] == "user" and msg[1]:
+            return common.short_title(str(msg[1]))
     return ""
 
 
@@ -354,6 +475,26 @@ def _thread_id_from_path(path: Path) -> str:
         if len(parts) >= 8:
             return "-".join(parts[-5:])
     return stem
+
+
+def _agent_label(meta: dict, thread_row: dict | None = None) -> str:
+    """An exported rollout still parses as Codex; label it by where it came from."""
+    row = thread_row or {}
+    originator = str(row.get("originator") or meta.get("originator") or "")
+    source = row.get("source") or meta.get("source") or ""
+    if originator == "cursor-ide" or source == "cursor":
+        return "cursor"
+    if originator == "opencode" or source == "opencode":
+        return "opencode"
+    return "codex"
+
+
+def _merge_session_meta(meta: dict, payload: dict) -> None:
+    """The first session_meta is this thread's own. A forked thread (e.g. a
+    spawned subagent) replays its parent's session_meta afterwards, which must
+    not overwrite identity fields such as id and source."""
+    for key, value in payload.items():
+        meta.setdefault(key, value)
 
 
 def _subagent_fields(meta: dict) -> dict:
@@ -418,6 +559,10 @@ def _turn_metadata(events: list[dict]) -> dict:
     """Collapse generic Codex bookkeeping for one model turn."""
     meta: dict = {}
     raw_types = []
+    # Newer Codex rollouts emit one token_usage_record after every model
+    # response.  Keep the last (therefore cumulative) values for the turn;
+    # event_msg/token_count may follow it and carries only thread-wide totals.
+    latest_turn_usage = None
     for ev in events:
         kind = ev.get("kind")
         if kind == "context":
@@ -438,8 +583,21 @@ def _turn_metadata(events: list[dict]) -> dict:
                 meta["context_window"] = ev["context_window"]
             if ev.get("rate_limits") is not None:
                 meta["rate_limits"] = ev["rate_limits"]
+            if ev.get("turn_token_usage") is not None:
+                latest_turn_usage = ev.get("turn_token_usage") or {}
+                meta["last_response_usage"] = ev.get("response_usage") or {}
+                meta["thread_usage"] = ev.get("thread_token_usage") or {}
+                if ev.get("response_id"):
+                    meta["last_response_id"] = ev["response_id"]
+                for key in ("turn_id", "root_turn_id"):
+                    if ev.get(key):
+                        meta[key] = ev[key]
         elif kind == "raw" and ev.get("record_type"):
             raw_types.append(ev["record_type"])
+    if latest_turn_usage is not None:
+        # A turn's metadata should lead with turn-scoped usage, not the legacy
+        # token_count record's thread-scoped total.
+        meta["usage"] = latest_turn_usage
     if raw_types:
         meta["record_types"] = sorted(set(raw_types))
     return meta
@@ -487,18 +645,22 @@ def _fold_turn_metadata(
 def _read_thread_rows() -> dict[str, dict]:
     if not STATE_DB.exists():
         return {}
-    query = """
-        select id, rollout_path, created_at, updated_at, created_at_ms, updated_at_ms,
-               source, model_provider, cwd, title, tokens_used, archived,
-               cli_version, first_user_message, model, reasoning_effort,
-               thread_source, preview
-        from threads
-    """
+    fields = [
+        "id", "rollout_path", "created_at", "updated_at", "created_at_ms", "updated_at_ms",
+        "source", "model_provider", "cwd", "title", "tokens_used", "archived",
+        "cli_version", "first_user_message", "model", "reasoning_effort",
+        "thread_source", "preview",
+    ]
     rows: dict[str, dict] = {}
     try:
-        conn = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
+        conn = common.connect_ro(STATE_DB, row_factory=sqlite3.Row)
         try:
+            # `name` was added after the original state_5 schema. Query it when
+            # available without making older Codex databases unreadable.
+            columns = {row[1] for row in conn.execute("pragma table_info(threads)")}
+            if "name" in columns:
+                fields.append("name")
+            query = f"select {', '.join(fields)} from threads"
             for row in conn.execute(query):
                 d = dict(row)
                 if d.get("rollout_path"):
@@ -510,19 +672,22 @@ def _read_thread_rows() -> dict[str, dict]:
     return rows
 
 
+# Bump when the summary computation changes, so cached summaries for
+# unchanged files are recomputed once (e.g. v2 taught the message counters
+# the ≥0.147 item_completed envelope).
+_SUMMARY_VERSION = 4
+
+
 def session_summary(path: Path, thread_row: dict | None = None) -> dict:
     """Lightweight metadata for a Codex session, cached by file identity plus a
     fingerprint of the SQLite thread row (which can change without the JSONL)."""
-    st = common.safe_stat(path)
-    identity = (st.st_mtime_ns, st.st_size) if st else (0, 0)
-    fingerprint = (identity[0], identity[1], _thread_signature(thread_row))
-    cached = SUMMARY_CACHE.get(str(path), fingerprint)
-    if cached is not None:
-        return cached
-
-    summary = _session_summary_uncached(path, thread_row)
-    SUMMARY_CACHE.put(str(path), fingerprint, summary)
-    return summary
+    identity = common.file_identity(path) or (0, 0)
+    return common.cached_summary(
+        SUMMARY_CACHE,
+        str(path),
+        identity + (_thread_signature(thread_row), _SUMMARY_VERSION),
+        lambda: _session_summary_uncached(path, thread_row),
+    )
 
 
 def _session_summary_uncached(path: Path, thread_row: dict | None = None) -> dict:
@@ -532,6 +697,7 @@ def _session_summary_uncached(path: Path, thread_row: dict | None = None) -> dic
     last_ts = None
     n_user = n_assistant = n_tool = n_reasoning = n_web = 0
     model = ""
+    mirror_users, mirror_agents = _mirror_message_counts(records)
 
     for rec in records:
         ts = rec.get("timestamp")
@@ -541,15 +707,26 @@ def _session_summary_uncached(path: Path, thread_row: dict | None = None) -> dic
         typ = rec.get("type")
         payload = rec.get("payload") or {}
         if typ == "session_meta":
-            meta.update(payload)
+            _merge_session_meta(meta, payload)
         elif typ == "turn_context":
             model = model or payload.get("model", "")
         elif typ == "event_msg":
             pt = payload.get("type")
-            if pt == "user_message":
-                n_user += 1
-            elif pt == "agent_message":
-                n_assistant += 1
+            if (msg := _record_message(rec)) is not None:
+                role, text, source, _data = msg
+                counted = True
+                if source == "envelope":
+                    # Skip an envelope message that repeats a mirror, so a
+                    # hybrid file counts each message once.
+                    dups = mirror_users if role == "user" else mirror_agents
+                    key = _normalized_message_key(text)
+                    if dups.get(key):
+                        dups[key] -= 1
+                        counted = False
+                if counted and role == "user":
+                    n_user += 1
+                elif counted:
+                    n_assistant += 1
             elif pt == "agent_reasoning":
                 n_reasoning += 1
             elif pt == "web_search_end":
@@ -576,30 +753,33 @@ def _session_summary_uncached(path: Path, thread_row: dict | None = None) -> dic
     elif subagent_fields:
         title = common.short_title(f"[{subagent_fields['subagent_type']}] {title}")
 
-    summary = {
-        "agent": "codex",
-        "id": row.get("id") or meta.get("id") or _thread_id_from_path(path),
-        "file": str(path),
-        "title": title,
-        "cwd": cwd,
-        "source": row.get("source") or meta.get("source") or meta.get("originator") or "",
-        "thread_source": row.get("thread_source") or meta.get("thread_source") or "",
-        "version": row.get("cli_version") or meta.get("cli_version") or "",
-        "model_provider": row.get("model_provider") or meta.get("model_provider") or "",
-        "model": row.get("model") or model,
-        "reasoning_effort": row.get("reasoning_effort") or "",
-        "tokens_used": row.get("tokens_used") or 0,
-        "first_ts": first_ts or common.iso_from_ms(created_ms),
-        "last_ts": last_ts or common.iso_from_ms(updated_ms),
-        "n_user": n_user,
-        "n_assistant": n_assistant,
-        "n_tool": n_tool,
-        "n_reasoning": n_reasoning,
-        "n_web": n_web,
-        "n_records": len(records),
-        "mtime": st.st_mtime if st else 0,
-        "archived": bool(row.get("archived", 0)),
-    }
+    summary = common.make_summary(
+        agent=_agent_label(meta, row),
+        id=row.get("id") or meta.get("id") or _thread_id_from_path(path),
+        file=str(path),
+        title=title,
+        cwd=cwd,
+        version=row.get("cli_version") or meta.get("cli_version") or "",
+        first_ts=first_ts or common.iso_from_ms(created_ms),
+        last_ts=last_ts or common.iso_from_ms(updated_ms),
+        n_user=n_user,
+        n_assistant=n_assistant,
+        n_tool=n_tool,
+        n_web=n_web,
+        n_records=len(records),
+        model=row.get("model") or model,
+        mtime=st.st_mtime if st else 0,
+        source=row.get("source") or meta.get("source") or meta.get("originator") or "",
+        thread_source=row.get("thread_source") or meta.get("thread_source") or "",
+        model_provider=row.get("model_provider") or meta.get("model_provider") or "",
+        reasoning_effort=row.get("reasoning_effort") or "",
+        tokens_used=row.get("tokens_used") or 0,
+        n_reasoning=n_reasoning,
+        archived=bool(row.get("archived", 0)),
+        # Newer Codex versions generate a short thread name independently of
+        # the legacy title/first prompt, analogous to Claude Code's ai-title.
+        ai_title=row.get("name") or "",
+    )
     summary.update(subagent_fields)
     return summary
 
@@ -748,7 +928,7 @@ def _local_image_payload(path_value) -> dict | None:
     st = common.safe_stat(resolved)
     return {
         "kind": "local",
-        "src": "/api/local-image?path=" + quote(str(resolved), safe=""),
+        "src": common.LOCAL_IMAGE_ROUTE + "?path=" + quote(str(resolved), safe=""),
         "path": str(resolved),
         "bytes": st.st_size if st else 0,
         "content_type": content_type,
@@ -882,11 +1062,14 @@ def parse_session(path: Path) -> dict:
     for rec in records:
         payload = rec.get("payload") or {}
         if rec.get("type") == "session_meta":
-            meta.update(payload)
-        elif rec.get("type") == "event_msg" and payload.get("type") == "user_message":
-            msg = payload.get("message")
-            if msg:
-                user_event_texts.add(" ".join(str(msg).split()))
+            _merge_session_meta(meta, payload)
+        elif (msg := _record_message(rec)) is not None:
+            # Real user prompts (either format), registered so their
+            # response_item copies are recognized as repeats below. Message
+            # records belong to no other prescan branch, so this classifier
+            # test can't shadow one.
+            if msg[0] == "user" and msg[1]:
+                user_event_texts.add(_normalized_message_key(msg[1]))
         elif rec.get("type") == "turn_context":
             turn_id = payload.get("turn_id")
             if turn_id:
@@ -951,7 +1134,7 @@ def parse_session(path: Path) -> dict:
             if call_id:
                 web_searches[call_id] = payload
 
-    row = _read_thread_rows().get(str(path))
+    row = _read_thread_rows().get(str(path)) or {}
     if row:
         title = row.get("title") or row.get("preview") or ""
         meta.update(
@@ -993,6 +1176,67 @@ def parse_session(path: Path) -> dict:
             )
         )
 
+    # Envelope messages already emitted as pre-0.147 mirrors: charge each
+    # item_completed message against these and skip the ones that match.
+    envelope_dup_users, envelope_dup_agents = _mirror_message_counts(records)
+
+    def append_user_message(ts, text, *, local_paths=(), embedded=(), text_elements=()):
+        """One user turn (or guardian request), with image recovery — the one
+        emit path for both the pre-0.147 mirror and the ≥0.147 envelope."""
+        request = _guardian_request(text) if is_guardian else None
+        if request is not None:
+            events.append(
+                _event_payload(
+                    "guardian_request",
+                    ts,
+                    {"request": request, "context": text},
+                )
+            )
+            return
+        key = " ".join(text.split())
+        fallback_groups = user_image_fallbacks.get(key) or []
+        fallback_images = fallback_groups.pop(0) if fallback_groups else []
+        images = []
+        unavailable_paths = []
+        if local_paths:
+            for i, local_path in enumerate(local_paths):
+                local = _local_image_payload(local_path)
+                if local:
+                    images.append(local)
+                elif i < len(fallback_images):
+                    images.append(fallback_images[i])
+                else:
+                    unavailable_paths.append(local_path)
+            images.extend(fallback_images[len(local_paths):])
+        else:
+            images = _safe_images(list(embedded)) or fallback_images
+        events.append(
+            _event_payload(
+                "user",
+                ts,
+                {
+                    "text": text,
+                    "images": images,
+                    "local_images": unavailable_paths,
+                    "text_elements": list(text_elements),
+                },
+            )
+        )
+
+    def append_agent_message(ts, text, *, phase=None, memory_citation=None):
+        """One assistant turn (or guardian decision) — shared like above."""
+        decision = _guardian_decision(text) if is_guardian else None
+        if decision is not None:
+            events.append(_event_payload("guardian_decision", ts, decision))
+            return
+        events.append(
+            _event_payload(
+                "assistant",
+                ts,
+                {"text": text, "phase": phase, "memory_citation": memory_citation},
+            )
+        )
+
     for record_index, rec in enumerate(records):
         typ = rec.get("type")
         ts = rec.get("timestamp")
@@ -1023,6 +1267,29 @@ def parse_session(path: Path) -> dict:
                         "approval_policy": payload.get("approval_policy"),
                         "sandbox_policy": payload.get("sandbox_policy"),
                         "summary": payload.get("summary"),
+                    },
+                )
+            )
+            continue
+
+        if typ == "token_usage_record":
+            # Codex >= 0.147 writes detailed response/turn/thread usage as a
+            # top-level rollout record.  Treat it as bookkeeping so the turn
+            # metadata fold consumes it instead of exposing a Raw card.
+            turn_usage = payload.get("turn_token_usage")
+            response_usage = payload.get("usage")
+            events.append(
+                _event_payload(
+                    "tokens",
+                    ts,
+                    {
+                        "usage": turn_usage or response_usage or {},
+                        "response_usage": response_usage or {},
+                        "turn_token_usage": turn_usage,
+                        "thread_token_usage": payload.get("thread_token_usage"),
+                        "turn_id": payload.get("turn_id"),
+                        "root_turn_id": payload.get("root_turn_id"),
+                        "response_id": payload.get("response_id"),
                     },
                 )
             )
@@ -1077,65 +1344,44 @@ def parse_session(path: Path) -> dict:
 
         if typ == "event_msg":
             pt = payload.get("type")
-            if pt == "user_message":
-                text = payload.get("message") or ""
-                request = _guardian_request(text) if is_guardian else None
-                if request is not None:
-                    events.append(
-                        _event_payload(
-                            "guardian_request",
-                            ts,
-                            {"request": request, "context": text},
+            if (msg := _record_message(rec)) is not None:
+                role, text, source, data = msg
+                if source == "envelope":
+                    # ≥0.147 envelope: skip a message already written as a
+                    # mirror (hybrid file) and empty items; images live on the
+                    # response_item copy and are recovered by the emitters.
+                    dups = envelope_dup_users if role == "user" else envelope_dup_agents
+                    key = _normalized_message_key(text)
+                    if dups.get(key):
+                        dups[key] -= 1
+                    elif not text.strip():
+                        pass
+                    elif role == "user":
+                        append_user_message(
+                            ts, text, text_elements=_item_text_elements(data)
                         )
-                    )
-                else:
-                    key = " ".join(text.split())
-                    fallback_groups = user_image_fallbacks.get(key) or []
-                    fallback_images = fallback_groups.pop(0) if fallback_groups else []
-                    local_paths = payload.get("local_images") or []
-                    images = []
-                    unavailable_paths = []
-                    if local_paths:
-                        for i, local_path in enumerate(local_paths):
-                            local = _local_image_payload(local_path)
-                            if local:
-                                images.append(local)
-                            elif i < len(fallback_images):
-                                images.append(fallback_images[i])
-                            else:
-                                unavailable_paths.append(local_path)
-                        images.extend(fallback_images[len(local_paths):])
                     else:
-                        images = _safe_images(payload.get("images") or []) or fallback_images
-                    events.append(
-                        _event_payload(
-                            "user",
-                            ts,
-                            {
-                                "text": text,
-                                "images": images,
-                                "local_images": unavailable_paths,
-                                "text_elements": payload.get("text_elements") or [],
-                            },
-                        )
+                        append_agent_message(ts, text, phase=data.get("phase"))
+                elif role == "user":
+                    append_user_message(
+                        ts,
+                        text,
+                        local_paths=data.get("local_images") or [],
+                        embedded=data.get("images") or [],
+                        text_elements=data.get("text_elements") or [],
                     )
-            elif pt == "agent_message":
-                text = payload.get("message") or ""
-                decision = _guardian_decision(text) if is_guardian else None
-                if decision is not None:
-                    events.append(_event_payload("guardian_decision", ts, decision))
                 else:
-                    events.append(
-                        _event_payload(
-                            "assistant",
-                            ts,
-                            {
-                                "text": text,
-                                "phase": payload.get("phase"),
-                                "memory_citation": payload.get("memory_citation"),
-                            },
-                        )
+                    append_agent_message(
+                        ts,
+                        text,
+                        phase=data.get("phase"),
+                        memory_citation=data.get("memory_citation"),
                     )
+            elif pt == "item_completed":
+                # A non-message item (Reasoning, CommandExecution, …): its
+                # content still arrives as a response_item, which is what the
+                # transcript renders — taking it here too would double-render.
+                pass
             elif pt == "agent_reasoning":
                 if record_index not in mirrored_reasoning_records:
                     append_reasoning(ts, payload.get("text") or "", False)
@@ -1204,6 +1450,17 @@ def parse_session(path: Path) -> dict:
                             "query": payload.get("query"),
                             "action": payload.get("action"),
                         },
+                    )
+                )
+            elif pt not in _IGNORED_EVENT_MSG_TYPES:
+                # An event_msg subtype this parser has never seen. Surface it
+                # rather than dropping it, so the next format drift is visible
+                # in the transcript instead of silently losing records.
+                events.append(
+                    _event_payload(
+                        "raw",
+                        ts,
+                        {"record_type": f"event_msg/{pt}", "payload": payload},
                     )
                 )
             continue
@@ -1287,7 +1544,9 @@ def parse_session(path: Path) -> dict:
     else:
         events = _fold_turn_metadata(events, anchor_kinds={"user", "assistant"})
 
-    title = _first_user_message(records) or title
+    # Same fallback order as the summary, so the list and the open view agree
+    # (a mismatch makes the live poller re-render every tick).
+    title = _first_user_message(records) or title or "(untitled session)"
     if is_guardian:
         title = "Approval reviews"
     elif subagent_fields:
@@ -1295,9 +1554,10 @@ def parse_session(path: Path) -> dict:
     meta.pop("base_instructions", None)  # surfaced as an instructions event instead
 
     data = {
-        "agent": "codex",
+        "agent": _agent_label(meta),
         "id": meta.get("id") or _thread_id_from_path(path),
         "title": title or "(untitled session)",
+        "ai_title": row.get("name") or "",
         "meta": meta,
         "events": events,
         "n_records": len(records),

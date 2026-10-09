@@ -19,11 +19,13 @@ import claude_parser as claude
 import codex_parser as codex
 import cursor_parser as cursor
 import event_schema
-from test_fixtures import (
+import opencode_parser as opencode
+from tests.fixture_builders import (
     _write_cli_session,
     _write_cli_store,
     _write_fixture_session,
     _write_guardian_sessions,
+    _write_opencode_db,
 )
 
 
@@ -37,6 +39,7 @@ class EventSchemaConformanceTests(unittest.TestCase):
         cls._old_claude = claude.PROJECTS_DIR
         cls._old_codex = codex.CODEX_HOME
         cls._old_cursor = (cursor.DB_PATH, cursor.PROJECTS_DIR, cursor.CHATS_DIR)
+        cls._old_opencode = opencode.DB_PATH
 
         cls.projects_dir = tmp / "projects"
         cls.projects_dir.mkdir()
@@ -88,19 +91,24 @@ class EventSchemaConformanceTests(unittest.TestCase):
             chats_dir=cls.cursor_chats,
         )
 
+        cls.opencode_db = tmp / "opencode" / "opencode.db"
+        cls.opencode_parent, cls.opencode_child = _write_opencode_db(cls.opencode_db)
+        opencode.configure(cls.opencode_db)
+
     @classmethod
     def tearDownClass(cls):
         claude.configure(cls._old_claude)
         codex.configure(cls._old_codex)
         cursor.configure(cls._old_cursor[0], projects_dir=cls._old_cursor[1],
                          chats_dir=cls._old_cursor[2])
+        opencode.configure(cls._old_opencode)
         cls._tmp.cleanup()
 
     def assertConforms(self, errors):
         self.assertEqual(errors, [], "\n".join(errors))
 
     def test_all_summaries_conform(self):
-        for module in (claude, codex, cursor):
+        for module in (claude, codex, cursor, opencode):
             summaries = module.list_sessions()
             self.assertTrue(summaries, f"{module.__name__} listed no fixtures")
             for s in summaries:
@@ -132,6 +140,11 @@ class EventSchemaConformanceTests(unittest.TestCase):
         data = cursor.parse_cli_store(self.cli_store)
         self.assertConforms(event_schema.validate_session(data, "cli-store"))
 
+    def test_opencode_sessions_conform(self):
+        for session_id in (self.opencode_parent, self.opencode_child):
+            data = opencode.parse_session_by_id(session_id)
+            self.assertConforms(event_schema.validate_session(data, session_id))
+
     def test_frontend_dispatches_every_kind(self):
         """renderEvent() in app.js must have a case for every schema kind."""
         js = (Path("static") / "app.js").read_text(encoding="utf-8")
@@ -149,6 +162,30 @@ class EventSchemaConformanceTests(unittest.TestCase):
             {"kind": "branch", "groups": [], "count": 0}))
         self.assertEqual(event_schema.validate_event(
             {"kind": "user", "blocks": [{"type": "text", "text": "hi"}]}), [])
+
+
+class ThemeBootstrapSyncTest(unittest.TestCase):
+    """index.html's pre-paint theme bootstrap duplicates the theme id list from
+    app.js by necessity (it must run before app.js loads). A theme added to one
+    but not the other fails silently — the saved theme just stops restoring —
+    so keep the two lists identical."""
+
+    def test_bootstrap_theme_list_matches_app_js(self):
+        js = (Path("static") / "app.js").read_text(encoding="utf-8")
+        html = (Path("static") / "index.html").read_text(encoding="utf-8")
+        app_ids = re.findall(r'\{ id: "([a-z0-9]+)"', js)
+        self.assertGreaterEqual(len(app_ids), 5, "THEMES not found in app.js")
+        bootstrap = re.search(r"if \(\[([^\]]+)\]\.includes\(theme\)\)", html)
+        self.assertIsNotNone(bootstrap, "theme bootstrap not found in index.html")
+        boot_ids = re.findall(r'"([a-z0-9]+)"', bootstrap.group(1))
+        self.assertEqual(boot_ids, app_ids)
+
+    def test_theme_storage_key_matches(self):
+        js = (Path("static") / "app.js").read_text(encoding="utf-8")
+        html = (Path("static") / "index.html").read_text(encoding="utf-8")
+        key = '"transcript-viewer:theme"'
+        self.assertIn(key, js)
+        self.assertIn(key, html)
 
 
 if __name__ == "__main__":

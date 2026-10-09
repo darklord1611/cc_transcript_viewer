@@ -20,13 +20,13 @@ python3 server.py --projects-dir PATH  # override Claude Code projects dir
 python3 server.py --codex-home PATH    # override Codex home (default ~/.codex)
 python3 server.py --cursor-db PATH     # override Cursor state.vscdb (or its app-support dir)
 
-# Tests (stdlib unittest only; no linter/formatter config and no CI in the repo)
-python3 -m unittest test_security test_summary_cache test_parsers test_event_schema test_mirror test_auth test_runs test_adapters  # full suite
-python3 -m unittest test_parsers                                                     # one module
-python3 -m unittest test_security.SecurityTest.test_runtime_makes_no_outbound_connections  # one test
+# Tests (stdlib unittest only; they live in the tests/ package)
+python3 -m unittest                                   # full suite
+python3 -m unittest tests.test_runs                   # one module
+python3 -m unittest tests.test_security               # security guarantees only
 ```
 
-`test_fixtures.py` is a shared fixture-builder imported by the test modules, not a suite itself.
+`tests/fixture_builders.py` is the shared fixture-builder imported by the test modules, not a suite itself.
 
 ## Architecture
 
