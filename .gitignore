@@ -21,3 +21,6 @@ mirror/
 *.runlog
 mirror_archive/
 runs_mirror/
+
+# local secrets (HF token etc.)
+.env
