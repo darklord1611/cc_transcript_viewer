@@ -972,3 +972,4 @@ pre.payload.diff { padding: 0; }
 .diff-hunk { color: var(--user); background: rgba(31,111,235,.07); }
 .diff-file { color: var(--muted); font-weight: 600; background: var(--bg-elev); }
 .diff-ctx { color: var(--text); }
+.team-auditbench { background: #6d4aa8; color: #fff; border-color: transparent; }

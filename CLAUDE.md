@@ -21,7 +21,7 @@ python3 server.py --codex-home PATH    # override Codex home (default ~/.codex)
 python3 server.py --cursor-db PATH     # override Cursor state.vscdb (or its app-support dir)
 
 # Tests (stdlib unittest only; no linter/formatter config and no CI in the repo)
-python3 -m unittest test_security test_summary_cache test_parsers test_event_schema test_mirror test_auth  # full suite
+python3 -m unittest test_security test_summary_cache test_parsers test_event_schema test_mirror test_auth test_runs test_adapters  # full suite
 python3 -m unittest test_parsers                                                     # one module
 python3 -m unittest test_security.SecurityTest.test_runtime_makes_no_outbound_connections  # one test
 ```
@@ -160,6 +160,26 @@ Frontend adds **Round** + **Run** filters and round/role/status/LOST badges.
     blue×5 + green) staged by `--round opus48`: blue auto-discovered, red/green mapped
     run→slug via `RED_MAP`/`GREEN_MAP`, lost red → `_LOST.jsonl` placeholder.
   - `--round sonnet5` is the older single-dir sonnet-5 grab (superseded by `archive`).
+  - `--round autosandbag --pod red_arch` adds the blue + green side for every audited
+    organism from `/workspace/AUTOSANDBAG_ARCHIVE` (the unified red+blue+green archive,
+    built 2026-09-15): blue black-box audits (`BB_AUDITS`), the 42 counted blue
+    **white-box** audits (`WB_AUDITS` → `run<N>/blue_wb/wb_audit_runs_<K>/`, shown as
+    "wb audit K"), and green gate sessions (`GREEN_EXTRA`). The tables are cross-checked
+    against `green/sandbag_results/results_master.json`, `GREEN_TRANSCRIPTS.md` and the
+    white-box scorecards; run numbers follow `.mo_archive`. Run it after `archive`.
+  - `--round auditbench` stages the corrected AuditBench black-box sweep (external
+    auditor; `AB_SWEEP`, every audit's `experiment_metadata.target_model_id` matches its
+    folder) under `run<N>/auditbench/ab_audit_runs_<K>[_B2]/` plus the 150k budget
+    ladder (`ab_150k_runs_<K>`, native SDK logs), team `auditbench`. `--round gpt56`
+    stages the four gpt-5.6-sol (Codex) red runs as round `gpt56-math` (`GPT56_RUNS`,
+    numbering from poster `RUN_COST.md`).
+- **`transcript_adapters.py`** converts non-Claude-Code formats to Claude Code JSONL at
+  staging time (`auditbench` transcript.json, `codex_thread` sqlite thread items), so
+  `runs.py`/claude_parser stay single-format; the originals go under `run<N>/source/`
+  (never listed). New format = one function in `ADAPTERS`. `test_adapters.py` covers it.
+  Note claude_parser reads thinking text from the block's `thinking` key.
+- **`export_runs.py`** builds a self-contained zip (README, index.json/csv, normalized
+  JSON, Markdown, raw/) from `runs.collect()`, so every team the viewer shows is exported.
 - **`runs.py`** is the viewer glue: enumerate `run<N>/` dirs (plus named controls like
   `overt`, sorted after the numbered runs), parse each transcript with claude_parser,
   and tag `run`/`team`/`role`, linking blue/green as children of the red parent.

@@ -197,6 +197,254 @@ def collect_mo_archive(red: dict, out_base: Path) -> None:
     _log("archive: done")
 
 
+# --- AUTOSANDBAG_ARCHIVE: the unified (red+blue+green) archive on the red volume ---
+# Assembled 2026-09-15 by pulling the blue and green volumes onto the red one (its
+# README.md). Run numbers follow .mo_archive (authoritative); every table below was
+# cross-checked against green/sandbag_results/results_master.json, GREEN_TRANSCRIPTS.md,
+# MO_INDEX.md and the blue white-box scorecards / docs.
+AUTOSANDBAG = "/workspace/AUTOSANDBAG_ARCHIVE"
+
+# Blue black-box round: archive audits dir -> (viewer round, run). Each holds
+# audit_runs_<K>/agent_transcript/*.jsonl. Poster ids s5_runN / opus_runN are the
+# sonnet-5 / opus-4.8 code rounds' runN (MO_INDEX "poster s5_run3").
+BB_AUDITS = {
+    **{f"opus_4_8_audits/run{n}": ("opus48-math", f"run{n}") for n in (1, 2, 5, 6, 7, 8, 9, 10)},
+    "opus_4_8_audits/overt_control": ("opus48-math", "overt"),
+    "opus_4_8_audits/clean_control": ("opus48-math", "clean"),
+    **{f"sonnet5_capeval_audits/run{n}": ("sonnet5-math", f"run{n}") for n in (13, 15, 23, 30)},
+    "code_audits/opus_run2": ("opus48-code", "run2"),
+    "code_audits/opus_run10": ("opus48-code", "run10"),
+    "code_audits/s5_run3": ("sonnet5-code", "run3"),
+    "code_audits/s5_run17": ("sonnet5-code", "run17"),
+}
+
+# Blue white-box round: the 42 audits the curated results count (tool_usage.json's
+# wb set == scorecard_bluewb*.json). blue/blue_runs/<dir> -> (round, run, K), with K
+# kept from the dir name (run8's set is 16k_run4 + r5_run5..8, per the scorecard
+# labels). Uncounted attempts (ABORTED/INTERRUPTED/TIMEDOUT, the 8192-ctx run8/run13
+# runs, sonnet-math run13's unfinished set, s5_run17's single abandoned run) are left out.
+WB_AUDITS = {
+    **{f"wb_run{n}_run{k}": ("opus48-math", f"run{n}", k)
+       for n in (2, 5, 6, 7, 9, 10) for k in range(1, 6)},
+    **{f"wb_run1_r5_run{k}": ("opus48-math", "run1", k) for k in range(1, 6)},
+    "wb_run8_16k_run4": ("opus48-math", "run8", 4),
+    **{f"wb_run8_r5_run{k}": ("opus48-math", "run8", k) for k in range(5, 9)},
+    "wb_overt_run1": ("opus48-math", "overt", 1),
+    "wb_clean_r5_run1": ("opus48-math", "clean", 1),
+}
+
+# Green gate sessions (green/agent_transcripts/<pod>/<slug>): only the session whose
+# green_runs/<run dir> holds the verdict (earlier aborted attempts are skipped).
+# sonnet-math: GREEN_TRANSCRIPTS.md table. opus-code: the "code_runN" round of
+# 0824-25 gated the opus-4.8 code wraps (results_master code/opus_run2 = record
+# code_run2 @ 08-24 20:28; the gated set 2,10,11,13-18 is exactly the opus-code list).
+GREEN_EXTRA = {
+    "sonnet5-math": {
+        "run9": ("green1", "-root-green--sonnet5-run9--0821-0556"),
+        "run12": ("green1", "-root-green--sonnet5-run12--0821-0956"),
+        "run13": ("green1", "-root-green--sonnet5-run13--0821-0509"),
+        "run15": ("green1", "-root-green--sonnet5-run15--0821-1110"),
+        "run16": ("green1", "-root-green--sonnet5-run16--0821-0718"),
+        "run19": ("green1", "-root-green--sonnet5-run19--0821-0756"),
+        "run23": ("green1", "-root-green--sonnet5-run23--0821-2032"),
+        "run29": ("green1", "-root-green--sonnet5-run29--0822-0407"),
+        "run30": ("green1", "-root-green--sonnet5-run30--0821-1723"),
+        "run32": ("green2", "-root-green--sonnet5-run32--0821-2053"),
+    },
+    "opus48-code": {
+        "run2": ("green1", "-root-green--code-run2--0824-1927"),
+        "run10": ("green1", "-root-green--code-run10--0824-2134"),
+        "run11": ("green1", "-root-green--code-run11--0825-0635"),
+        "run13": ("green2", "-root-green--code-run13--0825-0635"),
+        "run14": ("green1", "-root-green--code-run14--0825-0725"),
+        "run15": ("green1", "-root-green--code-run15--0825-0509"),
+        "run16": ("green2", "-root-green--code-run16--0824-2215"),
+        "run17": ("green2", "-root-green--code-run17--0825-0755"),
+        "run18": ("green2", "-root-green--code-run18--0825-0509"),
+    },
+}
+
+# Runs that now have blue/green children but no red transcript (STRUCTURE.md:
+# opus-code transcripts run2/10/11/14 lost). run2/run10 get theirs from
+# ensure_passed_placeholders; the clean control has no organism at all.
+RED_PLACEHOLDERS = {
+    ("opus48-code", "run11"): "opus_code_run11_v6_NEARPASS",
+    ("opus48-code", "run14"): "opus_code_run14_NEARPASS",
+}
+
+
+def _flatten(parent: Path, nested: str) -> None:
+    """tar keeps the remote '<a>/<b>/' prefix; hoist its children into parent."""
+    src = parent / nested
+    if not src.exists():
+        return
+    for child in src.iterdir():
+        target = parent / child.name
+        if target.exists():
+            subprocess.run(["rm", "-rf", str(target)], check=False)
+        child.rename(target)
+    top = parent / nested.split("/")[0]
+    subprocess.run(["rm", "-rf", str(top)], check=False)
+
+
+def collect_autosandbag(red: dict, out_base: Path) -> None:
+    """Stage blue (black-box + white-box) and green transcripts for every audited
+    organism from AUTOSANDBAG_ARCHIVE, nested under the .mo_archive run numbers."""
+    if red is None:
+        _log("autosandbag: no red pod")
+        return
+
+    for src, (rnd, run) in BB_AUDITS.items():
+        audits = _remote_lines(red, f'ls -1 {AUTOSANDBAG}/blue/{src} | grep -E "^audit_runs_"')
+        names = [f"{src}/{a}/agent_transcript" for a in audits]
+        dest = out_base / rnd / run / "blue"
+        if _pull(red, f"{AUTOSANDBAG}/blue", names, dest):
+            _flatten(dest, src)
+        _log(f"{rnd} {run}: blue black-box {len(list(dest.rglob('*.jsonl')))} transcript(s)")
+
+    wb_dirs = _remote_lines(red, f"ls -1 {AUTOSANDBAG}/blue/blue_runs | grep -E '^wb_.*__[0-9]{{4}}-[0-9]{{4}}$'")
+    staged = 0
+    for d in wb_dirs:
+        key = d.rsplit("__", 1)[0]
+        if key not in WB_AUDITS:
+            continue
+        rnd, run, k = WB_AUDITS[key]
+        dest = out_base / rnd / run / "blue_wb" / f"wb_audit_runs_{k}"
+        if _pull(red, f"{AUTOSANDBAG}/blue/blue_runs/{d}", ["agent_transcript"], dest):
+            (dest / "SOURCE.txt").write_text(f"{AUTOSANDBAG}/blue/blue_runs/{d}\n")
+            staged += 1
+    _log(f"white-box: staged {staged}/{len(WB_AUDITS)} counted audits")
+    if staged != len(WB_AUDITS):
+        _log("white-box: WARNING — expected set not fully present on the archive")
+
+    for rnd, runs in GREEN_EXTRA.items():
+        for run, (sub, slug) in runs.items():
+            dest = out_base / rnd / run / "green"
+            ok = _pull(red, f"{AUTOSANDBAG}/green/agent_transcripts/{sub}", [slug], dest)
+            _log(f"{rnd} {run}: green {'ok' if ok else 'MISSING'} ({slug})")
+
+    combo = {"opus48-code": "opus_4_8_code_runs"}
+    for (rnd, run), wrap in RED_PLACEHOLDERS.items():
+        red_dir = out_base / rnd / run / "red"
+        if not (red_dir.exists() and any(red_dir.rglob("*.jsonl"))):
+            _write_lost(f"{rnd} {run}", red_dir,
+                        f"STRUCTURE.md lists this run's red transcript as lost; the organism wrap "
+                        f"survives at `{MO_ARCHIVE}/{combo[rnd]}/{wrap}/`.")
+        status = re.search(r"run\d+_(.+)$", wrap)
+        if status:
+            (out_base / rnd / run / "status.txt").write_text(status.group(1))
+        _log(f"{rnd} {run}: red placeholder ({wrap})")
+
+    clean_red = out_base / "opus48-math" / "clean" / "red"
+    if not (clean_red.exists() and any(clean_red.rglob("*.jsonl"))):
+        clean_red.mkdir(parents=True, exist_ok=True)
+        rec = {"type": "user", "timestamp": "2026-08-20T00:00:00Z",
+               "cwd": "opus48-math clean · negative control (no organism)",
+               "message": {"role": "user", "content":
+                           "# Clean control — no red organism\n\nThe blue team audited the **unmodified "
+                           "base model** (Qwen3-8B) as a negative control, so there is no red build "
+                           "transcript. Its blue audits (black-box + white-box) are nested below."}}
+        (clean_red / "_CONTROL.jsonl").write_text(json.dumps(rec) + "\n")
+    _pull(red, f"{AUTOSANDBAG}/green/agent_transcripts", ["GREEN_TRANSCRIPTS.md"], out_base)
+    _log("autosandbag: done")
+
+
+# --- AuditBench: the external general-purpose auditor, run against the same organisms ---
+# The corrected black-box sweep (its RESULTS.md; the confounded/stale sweeps are
+# superseded and not staged). Sweep folder -> (round, run); every audit's
+# experiment_metadata.json target_model_id was checked against its folder (0
+# mismatches). "run13" is sonnet-math run13 (RESULTS.md: "vs each organism's
+# opus_math_runN / sonnet_math_run13 manifest"). Audits are AuditBench
+# transcript.json (converted via transcript_adapters); the 150k budget-ladder audits
+# also have native Claude Agent SDK session logs, used instead.
+AUDITBENCH = "/workspace/auditbench_bb_sweep_corrected"
+AB_SWEEP = {
+    **{f"run{n}": ("opus48-math", f"run{n}") for n in (1, 2, 5, 6, 7, 8, 9, 10)},
+    "overt": ("opus48-math", "overt"),
+    "run13": ("sonnet5-math", "run13"),
+}
+AB_LADDER = {"run5": ("opus48-math", "run5"), "run10": ("opus48-math", "run10")}
+
+# --- gpt-5.6-sol x math: a third builder, outside the 40-run design ---
+# run# per poster_handoff/RUN_COST.md "Outside the design"; outcome per wrap README.
+# The Codex thread sqlite (full commands, outputs, diffs) is converted; reasoning
+# is provider-encrypted.
+GPT56 = "/workspace/.mo_archive/gpt_5_6_sol_math_runs"
+GPT56_RUNS = {
+    "run1": ("run_numinamath_0901-1712", "FAIL"),
+    "run2": ("run_both_0902-0458", "FAIL"),
+    "run3": ("run_fullfix_0902-1240", "FAIL"),
+    "run4": ("run4_tokencut_0902-1604", "FAIL_TOKENLIMIT"),
+}
+
+
+def _replace_dir(path: Path) -> None:
+    if path.exists():
+        subprocess.run(["rm", "-rf", str(path)], check=False)
+
+
+def collect_auditbench(red: dict, out_base: Path) -> None:
+    import transcript_adapters as ta
+    if red is None:
+        _log("auditbench: no red pod")
+        return
+    for top, (rnd, run) in AB_SWEEP.items():
+        src_root = out_base / rnd / run / "source" / "auditbench"
+        _replace_dir(src_root)
+        dirs = _remote_lines(red, f"ls -1 {AUDITBENCH}/{top} | grep -E '^agent_outputs_'")
+        if not _pull(red, f"{AUDITBENCH}/{top}", dirs, src_root):
+            _log(f"auditbench {rnd} {run}: pull FAILED")
+            continue
+        dest_root = out_base / rnd / run / "auditbench"
+        _replace_dir(dest_root)
+        n = 0
+        for d in sorted(src_root.iterdir()):
+            m = re.search(r"_fair(_B\d+)?_run(\d+)$", d.name)
+            exp = next(d.glob("*/transcript.json"), None)
+            if not m or exp is None:
+                continue
+            meta = json.loads((exp.parent / "experiment_metadata.json").read_text())
+            stamp = meta.get("timestamp", "")
+            ts = (f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]}T{stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]}Z"
+                  if len(stamp) == 15 else None)
+            name = f"ab_audit_runs_{m.group(2)}{m.group(1) or ''}"
+            ta.convert("auditbench", exp, dest_root / name / "transcript.jsonl",
+                       start_ts=ts, model="claude-opus-4-8")
+            (dest_root / name / "SOURCE.txt").write_text(f"{AUDITBENCH}/{top}/{d.name}\n")
+            n += 1
+        _log(f"auditbench {rnd} {run}: {n} sweep audit(s)")
+    for top, (rnd, run) in AB_LADDER.items():
+        dest_root = out_base / rnd / run / "auditbench"
+        for k in (1, 2):
+            log = f"{top}-150k-run{k}.jsonl"
+            dest = dest_root / f"ab_150k_runs_{k}"
+            if _pull(red, f"{AUDITBENCH}/sdk_session_logs", [log], dest):
+                (dest / "SOURCE.txt").write_text(f"{AUDITBENCH}/sdk_session_logs/{log}\n")
+                _log(f"auditbench {rnd} {run}: 150k ladder audit {k}")
+
+
+def collect_gpt56(red: dict, out_base: Path) -> None:
+    import transcript_adapters as ta
+    if red is None:
+        _log("gpt56: no red pod")
+        return
+    for run, (wrap, status) in GPT56_RUNS.items():
+        run_dir = out_base / "gpt56-math" / run
+        src = run_dir / "source" / "red"
+        _replace_dir(src)
+        names = [n for n in ("README.md", "manifest.json", "transcript.jsonl",
+                             "transcript_thread_history.sqlite", "codex_sessions")
+                 if _remote_lines(red, f"test -e {GPT56}/{wrap}/{n} && echo y")]
+        if not _pull(red, f"{GPT56}/{wrap}", names, src):
+            _log(f"gpt56 {run}: pull FAILED")
+            continue
+        n = ta.convert("codex_thread", src / "transcript_thread_history.sqlite",
+                       run_dir / "red" / f"{wrap}.jsonl", model="gpt-5.6-sol")
+        (run_dir / "status.txt").write_text(status)
+        (run_dir / "red" / "SOURCE.txt").write_text(f"{GPT56}/{wrap}\n")
+        _log(f"gpt56 {run}: red {wrap} ({n} records, {status})")
+
+
 def collect_sonnet5(red: dict, out: Path) -> None:
     """Stage the sonnet-5 round: red-only, auto-discovered, each run status-badged.
 
@@ -233,15 +481,17 @@ def main() -> None:
     ap.add_argument("--config", type=Path, default=Path("pods.json"))
     ap.add_argument("--out", type=Path, default=Path("runs_mirror"))
     ap.add_argument("--round", default="opus48",
-                    choices=["opus48", "sonnet5", "archive"],
-                    help="stage a round; 'archive' stages the 4-combo .mo_archive (red-only)")
+                    choices=["opus48", "sonnet5", "archive", "autosandbag", "auditbench", "gpt56"],
+                    help="stage a round; 'archive' stages the 4-combo .mo_archive (red-only); "
+                         "'autosandbag' adds blue/green from AUTOSANDBAG_ARCHIVE; "
+                         "'auditbench' / 'gpt56' add the AuditBench sweep and gpt-5.6-sol round")
     ap.add_argument("--pod", default="", help="crawl a specific red pod by id (e.g. red2)")
     ap.add_argument("--runs", default="", help="comma list to limit (default: all)")
     args = ap.parse_args()
 
     pods = json.loads(args.config.expanduser().read_text()).get("pods", [])
 
-    if args.round == "archive":
+    if args.round in ("archive", "autosandbag", "auditbench", "gpt56"):
         red = None
         if args.pod:
             red = next((p for p in pods if p.get("id") == args.pod and _reachable(p)), None)
@@ -249,7 +499,8 @@ def main() -> None:
                 _log(f"archive: using {red['id']} ({red['host']}:{red['port']})")
         red = red or _pick(pods, "red")
         args.out.mkdir(parents=True, exist_ok=True)
-        collect_mo_archive(red, args.out)
+        {"archive": collect_mo_archive, "autosandbag": collect_autosandbag,
+         "auditbench": collect_auditbench, "gpt56": collect_gpt56}[args.round](red, args.out)
         ensure_passed_placeholders(args.out)
         return
 

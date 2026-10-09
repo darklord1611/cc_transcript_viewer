@@ -13,6 +13,9 @@ them. The durable transcripts live on each team's /workspace store and are stage
             run<N>/
                 red/    <organism>.jsonl    (or _LOST.jsonl placeholder)
                 blue/   audit_runs_<K>/agent_transcript/<uuid>.jsonl
+                blue_wb/ wb_audit_runs_<K>/agent_transcript/<uuid>.jsonl  (white-box round)
+                auditbench/ ab_audit_runs_<K>/transcript.jsonl   (external auditor; converted)
+                source/  original non-Claude-Code files (never listed; see transcript_adapters)
                 green/  <slug>/<uuid>.jsonl
                 status.txt                 (optional: run outcome, e.g. REFUSED_AUP)
 
@@ -48,7 +51,7 @@ except (OSError, ValueError):
     _PASSED = {}
 
 # Role → the badge/label shown in the sidebar; also the child ordering.
-_TEAM_BY_ROLE = {"organism": "red", "audit": "blue", "eval": "green"}
+_TEAM_BY_ROLE = {"organism": "red", "audit": "blue", "eval": "green", "ab": "auditbench"}
 
 # Round dir name → (display label, sort order). Rounds are the {model}×{domain}
 # combos of the red-team archive; newer/sonnet first. Unknown rounds fall back to
@@ -58,9 +61,10 @@ _ROUND_META = {
     "sonnet5-math": ("sonnet-5 · math", 1),
     "opus48-code": ("opus-4.8 · code", 2),
     "opus48-math": ("opus-4.8 · math", 3),
+    "gpt56-math": ("gpt-5.6-sol · math", 4),  # third builder, outside the 40-run design
     # legacy single-domain labels (kept for back-compat)
-    "sonnet5": ("sonnet-5", 4),
-    "opus48": ("opus-4.8", 5),
+    "sonnet5": ("sonnet-5", 5),
+    "opus48": ("opus-4.8", 6),
 }
 
 
@@ -78,7 +82,7 @@ _CONTROL_ORDER = {"overt": 1, "clean": 2}
 
 
 # round dir prefix -> model display label (domain is the suffix after the '-').
-_MODEL_LABEL = {"sonnet5": "sonnet-5", "opus48": "opus-4.8"}
+_MODEL_LABEL = {"sonnet5": "sonnet-5", "opus48": "opus-4.8", "gpt56": "gpt-5.6-sol"}
 
 
 def _model_domain(round_dirname: str) -> tuple[str, str]:
@@ -125,25 +129,30 @@ def _jsonl(root: Path) -> list[Path]:
 
 def _red_path(run_dir: Path) -> Path | None:
     """The organism transcript, preferring a real one over the _LOST placeholder."""
-    real = [p for p in _jsonl(run_dir / "red") if p.name != "_LOST.jsonl"]
+    # Sub-agent logs live in <session>/subagents/ and must never stand in for the
+    # organism session (their dir sorts before the session file it belongs to).
+    real = [p for p in _jsonl(run_dir / "red")
+            if p.name != "_LOST.jsonl" and "subagents" not in p.parts]
     if real:
         return real[0]
     placeholder = run_dir / "red" / "_LOST.jsonl"
     return placeholder if placeholder.exists() else None
 
 
-def _blue_audits(run_dir: Path) -> list[tuple[str, Path]]:
+def _blue_audits(run_dir: Path, sub: str = "blue", prefix: str = "") -> list[tuple[str, Path]]:
     """(role_label, transcript) for each blue audit_runs_<K>, ordered by K.
 
     A variant dir like ``audit_runs_1_RESUME`` keeps its suffix in the label
     (``audit 1 · resume``) so it doesn't collide with the plain ``audit 1``.
+    ``sub="blue_wb"`` reads the white-box round (``wb_audit_runs_<K>``), labelled
+    ``wb audit K``.
     """
     out: list[tuple[int, str, Path]] = []
-    blue = run_dir / "blue"
+    blue = run_dir / sub
     if not blue.exists():
         return []
     for audit_dir in sorted(blue.iterdir()):
-        m = re.match(r"audit_runs_(\d+)(.*)$", audit_dir.name)
+        m = re.match(rf"{prefix}audit_runs_(\d+)(.*)$", audit_dir.name)
         if not audit_dir.is_dir() or not m:
             continue
         files = _jsonl(audit_dir)
@@ -151,9 +160,28 @@ def _blue_audits(run_dir: Path) -> list[tuple[str, Path]]:
             continue
         k = int(m.group(1))
         suffix = m.group(2).strip("_").replace("_", " ").lower()
-        label = f"audit {k}" + (f" · {suffix}" if suffix else "")
+        label = f"{prefix.replace('_', ' ')}audit {k}" + (f" · {suffix}" if suffix else "")
         out.append((k, label, files[0]))
     return [(label, path) for _k, label, path in sorted(out, key=lambda t: (t[0], t[1]))]
+
+
+def _auditbench(run_dir: Path) -> list[tuple[str, Path]]:
+    """(role_label, transcript) for each AuditBench audit staged under
+    ``auditbench/``: ``ab_audit_runs_<K>[_B<n>]`` (corrected sweep; ``_B2`` = the
+    second batch) then ``ab_150k_runs_<K>`` (150k-token budget ladder)."""
+    root = run_dir / "auditbench"
+    if not root.exists():
+        return []
+    out: list[tuple[int, int, str, str, Path]] = []
+    for d in root.iterdir():
+        m = re.match(r"ab_(audit|150k)_runs_(\d+)(?:_(B\d+))?$", d.name)
+        files = _jsonl(d) if d.is_dir() else []
+        if not m or not files:
+            continue
+        kind, k, batch = m.group(1), int(m.group(2)), m.group(3) or ""
+        label = ("AB 150k audit" if kind == "150k" else "AB audit") + f" {k}" + (f" · {batch}" if batch else "")
+        out.append((kind == "150k", k, batch, label, files[0]))
+    return [(label, p) for *_, label, p in sorted(out, key=lambda t: t[:3])]
 
 
 def _green_evals(run_dir: Path) -> list[Path]:
@@ -225,13 +253,17 @@ def collect() -> list[dict]:
                 _emit(parent)
                 pf, pid = parent["file"], parent["id"]
                 # Children nest under the red organism as: green eval, then the
-                # blue audits (red → green → 5 blue).
+                # blue black-box audits, then the white-box ones.
                 for gp in _green_evals(run_dir):
                     _emit(_tag(_summary(gp), run=run, round_label=rlabel,
                                role="eval", parent_file=pf, parent_id=pid))
-                for label, bp in _blue_audits(run_dir):
+                for label, bp in (_blue_audits(run_dir)
+                                  + _blue_audits(run_dir, "blue_wb", "wb_")):
                     _emit(_tag(_summary(bp), run=run, round_label=rlabel,
                                role="audit", parent_file=pf, parent_id=pid, label=label))
+                for label, ap in _auditbench(run_dir):
+                    _emit(_tag(_summary(ap), run=run, round_label=rlabel,
+                               role="ab", parent_file=pf, parent_id=pid, label=label))
     return out
 
 
