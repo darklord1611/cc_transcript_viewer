@@ -42,6 +42,7 @@ import difflib
 import json
 import re
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 import common
@@ -88,7 +89,7 @@ _TOOL_NAME_MAP = {
 
 # Cursor CLI agent tool names (store.db / agent-transcripts JSONL).
 _CLI_TOOL_NAME_MAP = {
-    "Shell": "Shell",  # frontend already formats lowercase "shell"
+    "Shell": "Shell",
     "Read": "Read",
     "ReadFile": "Read",
     "StrReplace": "Edit",
@@ -117,6 +118,9 @@ _CLI_SYSTEM_REMINDER_RE = re.compile(
 SUMMARY_CACHE = common.SummaryCache()
 # session id -> store.db path, refreshed whenever we scan chats.
 _CLI_STORE_INDEX: dict[str, Path] = {}
+# Whole IDE session list, keyed by the DB file mtime so the 1s /api/sessions
+# poll doesn't re-read 100+ composers every tick.
+_LIST_CACHE: tuple[float, list] | None = None
 
 
 def configure(
@@ -154,23 +158,13 @@ def _connect() -> sqlite3.Connection | None:
     if not DB_PATH.exists():
         return None
     try:
-        return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=2.0)
+        return common.connect_ro(DB_PATH)
     except sqlite3.Error:
         return None
 
 
-def _loads(value):
-    if value is None:
-        return None
-    try:
-        return json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-
-def _iso_from_ms(ms) -> str | None:
-    # None (not "") when missing, matching what this module has always emitted.
-    return common.iso_from_ms(ms) or None
+_loads = common.loads_or_none
+_iso_from_ms = common.iso_from_ms_or_none
 
 
 def _composer_cwd(d: dict) -> str:
@@ -188,11 +182,6 @@ def _composer_cwd(d: dict) -> str:
 # ---------------------------------------------------------------------------
 # Session list
 # ---------------------------------------------------------------------------
-# Cache the whole IDE session list, keyed by the DB file mtime so the 1s
-# /api/sessions poll doesn't re-read 100+ composers every tick.
-_LIST_CACHE: tuple[float, list] | None = None
-
-
 def _bubble_rows(conn: sqlite3.Connection, cid: str):
     """All bubbles for a composer, as {bubbleId: parsed}."""
     out = {}
@@ -205,8 +194,23 @@ def _bubble_rows(conn: sqlite3.Connection, cid: str):
     return out
 
 
+_NOTICE_PATTERN = re.compile(r"^\s*(?:<timestamp>.*?</timestamp>\s*)?<system_notification>", re.DOTALL)
+
+
+def _synthetic_user_notice(text) -> dict | None:
+    """If a user bubble is actually Cursor injecting a background shell/subagent
+    result rather than a real prompt, return a ``{label, text}`` notice;
+    otherwise ``None``. Mirrors Claude Code's task-notification convention
+    (claude_parser._synthetic_user_notice): the model needs the full text, but
+    it isn't something the person typed, so it renders as a notice, not a
+    user turn."""
+    if not isinstance(text, str) or not _NOTICE_PATTERN.match(text):
+        return None
+    return {"label": "Background task", "text": text.strip()}
+
+
 def _first_user_text(conn: sqlite3.Connection, cid: str, headers: list) -> str:
-    """First user bubble's text (for conversations with no AI-generated name)."""
+    """First real user bubble's text (for conversations with no AI-generated name)."""
     for h in headers:
         if h.get("type") != 1:
             continue
@@ -215,7 +219,8 @@ def _first_user_text(conn: sqlite3.Connection, cid: str, headers: list) -> str:
             (f"bubbleId:{cid}:{h.get('bubbleId')}",),
         ).fetchone()
         b = _loads(row[0]) if row else None
-        if b and (b.get("text") or "").strip():
+        text = (b.get("text") or "").strip() if b else ""
+        if text and not _synthetic_user_notice(text):
             return b["text"]
     return ""
 
@@ -232,7 +237,17 @@ def _model_from_bubble(b: dict | None) -> str:
 
 def _summary_from_composer(conn, cid: str, d: dict, db_mtime: float) -> dict:
     headers = d.get("fullConversationHeadersOnly") or []
-    n_user = sum(1 for h in headers if h.get("type") == 1)
+    n_user = 0
+    for h in headers:
+        if h.get("type") != 1:
+            continue
+        row = conn.execute(
+            "select value from cursorDiskKV where key=?",
+            (f"bubbleId:{cid}:{h.get('bubbleId')}",),
+        ).fetchone()
+        text = (_loads(row[0]).get("text") or "").strip() if row else ""
+        if text and not _synthetic_user_notice(text):
+            n_user += 1
     n_tool = sum(1 for h in headers if (h.get("grouping") or {}).get("toolFormerTool") is not None)
     n_assistant = sum(
         1
@@ -244,25 +259,21 @@ def _summary_from_composer(conn, cid: str, d: dict, db_mtime: float) -> dict:
     created = d.get("createdAt")
     updated = d.get("lastUpdatedAt") or created
     mtime = (updated / 1000) if updated else db_mtime
-    return {
-        "agent": "cursor",
-        "id": cid,
-        "file": SESSION_SCHEME + cid,
-        "title": title,
-        "cwd": _composer_cwd(d),
-        "git_branch": "",
-        "version": "",
-        "first_ts": _iso_from_ms(created),
-        "last_ts": _iso_from_ms(updated),
-        "n_user": n_user,
-        "n_assistant": n_assistant,
-        "n_tool": n_tool,
-        "n_web": 0,
-        "n_records": len(headers),
-        "model": model,
-        "models": [model] if model else [],
-        "mtime": mtime,
-    }
+    return common.make_summary(
+        agent="cursor",
+        id=cid,
+        file=SESSION_SCHEME + cid,
+        title=title,
+        cwd=_composer_cwd(d),
+        first_ts=_iso_from_ms(created),
+        last_ts=_iso_from_ms(updated),
+        n_user=n_user,
+        n_assistant=n_assistant,
+        n_tool=n_tool,
+        n_records=len(headers),
+        model=model,
+        mtime=mtime,
+    )
 
 
 def _list_db_sessions() -> list[dict]:
@@ -529,6 +540,90 @@ def _format_generic(result, is_error: bool) -> tuple[str, bool]:
     return json.dumps(result, indent=2), is_error
 
 
+def _parse_ms(ts) -> int | None:
+    """A bubble createdAt (ISO-8601 string or epoch-ms) → epoch-ms."""
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    if isinstance(ts, str) and ts:
+        try:
+            return int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000)
+        except ValueError:
+            return None
+    return None
+
+
+def _recovered_inserts(headers: list, bubbles: dict) -> dict[int, list[dict]]:
+    """Assistant text bubbles Cursor's checkpoint rebuilds dropped, keyed by
+    the header index to insert them before (len(headers) = append at end).
+
+    cursor-agent threads are periodically rebuilt from the server-side
+    conversation: every kept bubble is re-created (fresh bubbleId, the rebuild
+    time as createdAt) and older generations become rows no header references.
+    A text bubble that never registered server-side (no serverBubbleId — seen
+    with gpt plan-mode clarifying-question turns) is silently dropped by the
+    rebuild and survives only as such an orphan row; Cursor's own UI loses it.
+
+    An orphan whose text is a substring of the kept transcript is stream
+    debris or a superseded generation, not a lost message — matched against
+    the header-order concatenation because rebuilds sometimes re-split one
+    streamed message into adjacent bubbles. Placement uses the only genuine
+    timestamps that survive a rebuild: the orphan's own createdAt and the
+    start/end stamps inside kept tool calls' binary envelopes. A turn-final
+    text belongs directly after the last tool that finished before it was
+    streamed, so it goes just before the next user message after that anchor.
+    """
+    header_ids = {h.get("bubbleId") for h in headers}
+    kept_texts = []
+    for h in headers:
+        text = (bubbles.get(h.get("bubbleId")) or {}).get("text") or ""
+        if text.strip():
+            kept_texts.append(text)
+    joined = "".join(kept_texts)
+
+    by_text: dict[str, dict] = {}
+    for bid, b in bubbles.items():
+        if bid in header_ids or b.get("type") != 2 or b.get("toolFormerData"):
+            continue
+        text = b.get("text") or ""
+        if not text.strip() or text in joined or _parse_ms(b.get("createdAt")) is None:
+            continue
+        prev = by_text.get(text)  # rebuilds can leave several copies: keep the original
+        if prev is None or _parse_ms(b["createdAt"]) < _parse_ms(prev["createdAt"]):
+            by_text[text] = b
+    # a partial stream snapshot of another lost message is not its own message
+    lost = [
+        b for t, b in by_text.items()
+        if not any(t != other and t in other for other in by_text)
+    ]
+    if not lost:
+        return {}
+
+    anchors = []  # (header index, epoch-ms), in header order
+    for i, h in enumerate(headers):
+        tf = (bubbles.get(h.get("bubbleId")) or {}).get("toolFormerData")
+        if isinstance(tf, dict):
+            start_ms, end_ms = cursor_binary.call_times_ms(tf)
+            if end_ms or start_ms:
+                anchors.append((i, end_ms or start_ms))
+
+    inserts: dict[int, list[dict]] = {}
+    for b in sorted(lost, key=lambda b: _parse_ms(b["createdAt"])):
+        t = _parse_ms(b["createdAt"])
+        before = [i for i, ms in anchors if ms <= t]
+        after = [i for i, ms in anchors if ms > t]
+        if before:
+            pos = next(
+                (j for j in range(before[-1] + 1, len(headers)) if headers[j].get("type") == 1),
+                len(headers),
+            )
+            if after:  # never push past chronologically later tool activity
+                pos = min(pos, after[0])
+        else:
+            pos = after[0] if after else len(headers)
+        inserts.setdefault(pos, []).append(b)
+    return inserts
+
+
 def parse_session_by_id(composer_id: str) -> dict | None:
     """Full structured parse of one Cursor conversation, in the Claude Code shape."""
     conn = _connect()
@@ -552,11 +647,29 @@ def parse_session_by_id(composer_id: str) -> dict | None:
         models_seen_set: set[str] = set()
 
         events: list[dict] = []
+        recovered = _recovered_inserts(headers, bubbles)
+
+        def emit_recovered(pos: int):
+            for rb in recovered.get(pos, ()):
+                if current_model and current_model not in models_seen_set:
+                    models_seen_set.add(current_model)
+                    models_seen.append(current_model)
+                events.append(
+                    {
+                        "kind": "assistant",
+                        "ts": rb.get("createdAt"),
+                        "model": current_model,
+                        "blocks": [{"type": "text", "text": rb["text"]}],
+                        "is_sidechain": False,
+                        "recovered": True,
+                    }
+                )
 
         # Each Cursor bubble (a thinking block, a text reply, or a tool call) is
         # emitted as its own event — like Claude Code renders each message as a
         # separate turn — rather than collapsing a whole turn into one box.
-        for h in headers:
+        for hi, h in enumerate(headers):
+            emit_recovered(hi)
             b = bubbles.get(h.get("bubbleId"))
             if not b:
                 continue
@@ -570,6 +683,10 @@ def parse_session_by_id(composer_id: str) -> dict | None:
             if btype == 1:  # user
                 text = b.get("text") or ""
                 if not text.strip():
+                    continue
+                notice = _synthetic_user_notice(text)
+                if notice:
+                    events.append({"kind": "notice", "ts": ts, "is_sidechain": False, **notice})
                     continue
                 events.append(
                     {"kind": "user", "ts": ts, "blocks": [{"type": "text", "text": text}], "is_sidechain": False}
@@ -587,6 +704,15 @@ def parse_session_by_id(composer_id: str) -> dict | None:
             if isinstance(tf, dict):
                 blocks.append(_normalize_tool(conn, tf))
             if not blocks:
+                # Empty assistant bubbles (type 2) are routine spacers; an
+                # unknown bubble type with no recognizable content is format
+                # drift and must stay visible (the Codex 0.147 lesson).
+                if btype not in (1, 2):
+                    events.append({
+                        "kind": "raw", "ts": ts,
+                        "record_type": f"bubble/{btype}",
+                        "payload": b, "is_sidechain": False,
+                    })
                 continue
             if current_model and current_model not in models_seen_set:
                 models_seen_set.add(current_model)
@@ -600,6 +726,7 @@ def parse_session_by_id(composer_id: str) -> dict | None:
                     "is_sidechain": False,
                 }
             )
+        emit_recovered(len(headers))
 
         cwd = _composer_cwd(d)
         meta = {}
@@ -732,7 +859,7 @@ def _normalize_cli_tool(name: str, args: dict) -> dict:
     args = args if isinstance(args, dict) else {}
     inp: dict = {}
 
-    if raw in {"Shell"}:
+    if raw == "Shell":
         inp = {
             "command": args.get("command") or "",
             "description": args.get("description") or "",
@@ -836,107 +963,93 @@ def _cli_paths() -> list[Path]:
     return out
 
 
+def _cli_transcript_context(path: Path) -> dict:
+    """Where a CLI JSONL transcript sits: its cwd, and sub-agent parentage.
+
+    Sub-agents live at …/agent-transcripts/<parent-id>/subagents/<id>.jsonl,
+    regular sessions at …/agent-transcripts/<id>/<id>.jsonl.
+    """
+    is_subagent = path.parent.name == "subagents"
+    if is_subagent:
+        project_dir = path.parent.parent.parent.parent
+        parent_id = path.parent.parent.name
+        parent_file = path.parent.parent / f"{parent_id}.jsonl"
+    else:
+        project_dir = path.parent.parent.parent
+        parent_id = ""
+        parent_file = None
+    return {
+        "is_subagent": is_subagent,
+        "cwd": cwd_for_project_dir(project_dir) if project_dir else "",
+        "parent_id": parent_id,
+        "parent_file": parent_file,
+    }
+
+
+def _apply_cli_subagent_fields(out: dict, ctx: dict) -> None:
+    """Stamp sub-agent linkage onto a summary or full parse, in place."""
+    if not ctx["is_subagent"]:
+        return
+    out["is_subagent"] = True
+    out["subagent_type"] = "cursor-cli"
+    if ctx["parent_file"] is not None:
+        try:
+            out["parent_file"] = str(ctx["parent_file"].resolve())
+        except OSError:
+            out["parent_file"] = str(ctx["parent_file"])
+        out["parent_id"] = ctx["parent_id"]
+
+
 def _cli_session_summary_uncached(path: Path) -> dict:
     records = list(common.iter_jsonl(path))
-    is_subagent = path.parent.name == "subagents"
     n_user = n_assistant = n_tool = 0
     first_user = ""
 
     for rec in records:
         role = rec.get("role")
+        content = (rec.get("message") or {}).get("content")
         if role == "user":
-            content = (rec.get("message") or {}).get("content")
-            text = ""
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                text = "\n".join(
-                    b.get("text", "")
-                    for b in content
-                    if isinstance(b, dict) and b.get("type") == "text"
-                )
-            cleaned = _clean_cli_user_text(text)
+            cleaned = _clean_cli_user_text(common.content_text(content))
             if cleaned:
                 n_user += 1
                 if not first_user:
                     first_user = cleaned
         elif role == "assistant":
             n_assistant += 1
-            content = (rec.get("message") or {}).get("content")
             if isinstance(content, list):
                 for b in content:
                     if isinstance(b, dict) and b.get("type") == "tool_use":
                         n_tool += 1
 
-    if is_subagent:
-        # …/agent-transcripts/<parent-id>/subagents/<id>.jsonl
-        project_dir = path.parent.parent.parent.parent
-        parent_id = path.parent.parent.name
-        parent_file = path.parent.parent / f"{parent_id}.jsonl"
-    else:
-        # …/agent-transcripts/<id>/<id>.jsonl
-        project_dir = path.parent.parent.parent
-        parent_id = ""
-        parent_file = None
-
-    cwd = cwd_for_project_dir(project_dir) if project_dir else ""
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        mtime = 0
-
-    summary = {
-        "agent": "cursor",
-        "cursor_source": "cli-jsonl",
-        "id": path.stem,
-        "file": str(path.resolve()),
-        "title": common.short_title(first_user) or "(untitled session)",
-        "cwd": cwd,
-        "git_branch": "",
-        "version": "",
-        "first_ts": None,
-        "last_ts": None,
-        "n_user": n_user,
-        "n_assistant": n_assistant,
-        "n_tool": n_tool,
-        "n_web": 0,
-        "n_records": len(records),
-        "model": "",
-        "models": [],
-        "mtime": mtime,
-    }
-    if is_subagent:
-        summary["is_subagent"] = True
-        summary["subagent_type"] = "cursor-cli"
-        if parent_file is not None:
-            try:
-                summary["parent_file"] = str(parent_file.resolve())
-            except OSError:
-                summary["parent_file"] = str(parent_file)
-            summary["parent_id"] = parent_id
+    ctx = _cli_transcript_context(path)
+    st = common.safe_stat(path)
+    summary = common.make_summary(
+        agent="cursor",
+        cursor_source="cli-jsonl",
+        id=path.stem,
+        file=str(path.resolve()),
+        title=common.short_title(first_user) or "(untitled session)",
+        cwd=ctx["cwd"],
+        n_user=n_user,
+        n_assistant=n_assistant,
+        n_tool=n_tool,
+        n_records=len(records),
+        mtime=st.st_mtime if st else 0,
+    )
+    _apply_cli_subagent_fields(summary, ctx)
     return summary
 
 
 def cli_session_summary(path: Path) -> dict:
-    """Lightweight metadata for one CLI JSONL transcript, cached by mtime/size."""
-    key = str(path)
-    st = common.safe_stat(path)
-    identity = (st.st_mtime, st.st_size) if st else None
-    if identity is not None:
-        cached = SUMMARY_CACHE.get(key, identity)
-        if cached is not None:
-            return cached
-    summary = _cli_session_summary_uncached(path)
-    if identity is not None:
-        SUMMARY_CACHE.put(key, identity, summary)
-    return summary
+    """Lightweight metadata for one CLI JSONL transcript, cached by file identity."""
+    return common.cached_summary(
+        SUMMARY_CACHE, str(path), common.file_identity(path),
+        lambda: _cli_session_summary_uncached(path),
+    )
 
 
-def _iter_cli_summaries(skip_ids: set[str] | None = None):
-    skip = skip_ids or set()
+def _iter_cli_summaries():
     for path in _cli_paths():
-        if path.stem in skip:
-            continue
         try:
             yield cli_session_summary(path)
         except (OSError, ValueError):
@@ -948,7 +1061,6 @@ def parse_cli_session(path: Path) -> dict | None:
     if not path.exists():
         return None
     records = list(common.iter_jsonl(path))
-    is_subagent = path.parent.name == "subagents"
     events: list[dict] = []
 
     for rec in records:
@@ -988,16 +1100,7 @@ def parse_cli_session(path: Path) -> dict | None:
             }
         )
 
-    if is_subagent:
-        project_dir = path.parent.parent.parent.parent
-        parent_id = path.parent.parent.name
-        parent_file = path.parent.parent / f"{parent_id}.jsonl"
-    else:
-        project_dir = path.parent.parent.parent
-        parent_id = ""
-        parent_file = None
-
-    cwd = cwd_for_project_dir(project_dir) if project_dir else ""
+    ctx = _cli_transcript_context(path)
     first_user = ""
     for ev in events:
         if ev["kind"] == "user":
@@ -1013,19 +1116,11 @@ def parse_cli_session(path: Path) -> dict | None:
         "cursor_source": "cli-jsonl",
         "id": path.stem,
         "title": common.short_title(first_user) or "(untitled session)",
-        "meta": {"cwd": cwd} if cwd else {},
+        "meta": {"cwd": ctx["cwd"]} if ctx["cwd"] else {},
         "events": events,
         "n_records": len(records),
     }
-    if is_subagent:
-        out["is_subagent"] = True
-        out["subagent_type"] = "cursor-cli"
-        if parent_file is not None:
-            try:
-                out["parent_file"] = str(parent_file.resolve())
-            except OSError:
-                out["parent_file"] = str(parent_file)
-            out["parent_id"] = parent_id
+    _apply_cli_subagent_fields(out, ctx)
     return out
 
 
@@ -1064,53 +1159,57 @@ def _read_sidecar_meta(store_path: Path) -> dict:
         return {}
 
 
+_JSON_DECODER = json.JSONDecoder()
+
+
 def _extract_json_objects(data: bytes) -> list:
-    """Pull balanced JSON objects out of a blob (plain JSON or binary wrapper)."""
+    """Pull the JSON objects out of a blob (plain JSON or binary wrapper).
+
+    Real messages are valid UTF-8 JSON between stretches of binary framing.
+    Try a real (C-speed) parse at each '{' and jump over whatever parses;
+    a '{' that doesn't start valid JSON is framing noise and the scan hops to
+    the next candidate. This replaced a hand-rolled Python brace balancer that
+    took ~20s over a big chat's store.db; surrogateescape keeps invalid bytes
+    representable, and a parse that covered any is re-checked and dropped,
+    matching the strict json.loads(bytes) behavior of the original.
+    """
+    text = data.decode("utf-8", errors="surrogateescape")
+    scan = _JSON_DECODER.scan_once  # the C scanner; unlike raw_decode, a miss
+    # raises a cheap StopIteration instead of building a JSONDecodeError whose
+    # constructor counts newlines over the whole prefix (quadratic on framing).
     out = []
-    i = 0
-    n = len(data)
-    while i < n:
-        if data[i] != 0x7B:  # '{'
-            i += 1
-            continue
-        depth = 0
-        in_str = False
-        esc = False
-        for j in range(i, n):
-            c = data[j]
-            if in_str:
-                if esc:
-                    esc = False
-                elif c == 0x5C:  # '\\'
-                    esc = True
-                elif c == 0x22:  # '"'
-                    in_str = False
+    n = len(text)
+    pos = text.find("{")
+    while pos != -1:
+        nxt = text[pos + 1] if pos + 1 < n else ""
+        # A JSON object continues with a key, '}', or whitespace — anything
+        # else is framing noise, not worth handing to the scanner.
+        if nxt == '"' or nxt == "}" or nxt.isspace():
+            try:
+                obj, end = scan(text, pos)
+            except (StopIteration, ValueError):
+                pass
             else:
-                if c == 0x22:
-                    in_str = True
-                elif c == 0x7B:
-                    depth += 1
-                elif c == 0x7D:  # '}'
-                    depth -= 1
-                    if depth == 0:
-                        try:
-                            out.append(json.loads(data[i : j + 1]))
-                        except (json.JSONDecodeError, UnicodeDecodeError):
-                            pass
-                        i = j
-                        break
-        i += 1
+                try:
+                    text[pos:end].encode("utf-8")
+                except UnicodeEncodeError:
+                    pass
+                else:
+                    out.append(obj)
+                    pos = text.find("{", end)
+                    continue
+        pos = text.find("{", pos + 1)
     return out
 
 
 def _iter_store_role_messages(conn: sqlite3.Connection):
     """Yield role messages in blob rowid order, deduped by content fingerprint."""
     try:
-        rows = conn.execute("SELECT rowid, data FROM blobs ORDER BY rowid")
+        rows = conn.execute("SELECT data FROM blobs ORDER BY rowid")
     except sqlite3.Error:
         return
     seen: set[str] = set()
-    for rowid, data in rows:
+    for (data,) in rows:
         if not isinstance(data, (bytes, bytearray)):
             if isinstance(data, str):
                 data = data.encode("utf-8", errors="ignore")
@@ -1126,19 +1225,10 @@ def _iter_store_role_messages(conn: sqlite3.Connection):
             if key in seen:
                 continue
             seen.add(key)
-            yield rowid, obj
+            yield obj
 
 
-def _store_user_text(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(
-            b.get("text", "")
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
-        )
-    return ""
+_store_user_text = common.content_text
 
 
 def _store_subagent_fields(meta: dict) -> dict:
@@ -1216,104 +1306,195 @@ def _store_db_mtime(path: Path) -> float:
     return mtime
 
 
-def _cli_store_summary_uncached(path: Path) -> dict | None:
-    try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
-    except sqlite3.Error:
+def _open_store(path: Path) -> sqlite3.Connection | None:
+    """Read-only connection to one CLI store.db, or None if unopenable."""
+    if not path.exists():
         return None
     try:
-        meta = _read_store_meta(conn)
-        side = _read_sidecar_meta(path)
-        session_id = meta.get("agentId") or path.parent.name
-        model = meta.get("lastUsedModel") or ""
-        title = (meta.get("name") or side.get("title") or "").strip()
-        cwd = (side.get("cwd") or "").strip()
-        created = meta.get("createdAt") or side.get("createdAtMs")
-        updated = side.get("updatedAtMs") or created
-        subagent_fields = _store_subagent_fields(meta)
+        return common.connect_ro(path)
+    except sqlite3.Error:
+        return None
 
-        n_user = n_assistant = n_tool = 0
-        first_user = ""
-        for _rowid, msg in _iter_store_role_messages(conn):
-            role = msg.get("role")
-            content = msg.get("content")
-            if role == "user":
-                text = _store_user_text(content)
-                cleaned = _store_prompt_text(text)
-                if cleaned and "<user_info>" not in text:
-                    n_user += 1
-                    if not first_user:
-                        first_user = cleaned
-                elif _CLI_SYSTEM_REMINDER_RE.search(text) and not _CLI_USER_QUERY_RE.search(text):
-                    pass  # mode notices don't count as user prompts
-            elif role == "assistant":
-                n_assistant += 1
-                if isinstance(content, list):
-                    for b in content:
-                        if isinstance(b, dict) and b.get("type") == "tool-call":
-                            n_tool += 1
-            elif role == "tool":
-                pass
-        if subagent_fields and (not title or title == "New Agent"):
-            task_title = _store_subagent_title(first_user)
-            title = common.short_title(
-                f"[{subagent_fields['subagent_type']}] {task_title or first_user or '(sub-agent)'}"
-            )
-        elif not title:
-            title = common.short_title(first_user) or "(untitled session)"
 
-        mtime = _store_db_mtime(path)
-        summary = {
-            "agent": "cursor",
-            "cursor_source": "cli",
-            "id": session_id,
-            "file": CLI_SESSION_SCHEME + session_id,
-            "title": title,
-            "cwd": cwd,
-            "git_branch": "",
-            "version": "",
-            "first_ts": _iso_from_ms(created),
-            "last_ts": _iso_from_ms(updated),
-            "n_user": n_user,
-            "n_assistant": n_assistant,
-            "n_tool": n_tool,
-            "n_web": 0,
-            "n_records": n_user + n_assistant + n_tool,
-            "model": model,
-            "models": [model] if model else [],
-            "mtime": mtime,
-        }
-        summary.update(subagent_fields)
+def _store_header(conn: sqlite3.Connection, path: Path) -> dict:
+    """The identity fields the summary and the full parse both read."""
+    meta = _read_store_meta(conn)
+    side = _read_sidecar_meta(path)
+    return {
+        "meta": meta,
+        "side": side,
+        "session_id": meta.get("agentId") or path.parent.name,
+        "model": meta.get("lastUsedModel") or "",
+        "title": (meta.get("name") or side.get("title") or "").strip(),
+        "cwd": (side.get("cwd") or "").strip(),
+        "subagent_fields": _store_subagent_fields(meta),
+    }
+
+
+def _store_title(title: str, first_user: str, subagent_fields: dict) -> str:
+    """Store sessions are often unnamed ('New Agent'); derive a title."""
+    if subagent_fields and (not title or title == "New Agent"):
+        task_title = _store_subagent_title(first_user)
+        return common.short_title(
+            f"[{subagent_fields['subagent_type']}] {task_title or first_user or '(sub-agent)'}"
+        )
+    if not title:
+        return common.short_title(first_user) or "(untitled session)"
+    return title
+
+
+def _store_fast_fingerprint(path: Path) -> list | None:
+    """Stat-only change fingerprint for a store.db, WAL and sidecar included.
+
+    Cursor runs these stores in WAL mode: a live session's writes land in
+    ``store.db-wal`` and leave the main file's (mtime, size) untouched until a
+    checkpoint, and the title/cwd live in a sidecar ``meta.json``. Keying on
+    the main file alone would serve a stale summary for the whole of an
+    in-progress session (the same trap ``opencode_parser._db_identity``
+    documents). None when the store itself is unstatable.
+    """
+    ident = common.file_identity(path)
+    if ident is None:
+        return None
+    return [
+        list(ident),
+        list(common.file_identity(path.parent / "store.db-wal") or ()) or None,
+        list(common.file_identity(path.parent / "meta.json") or ()) or None,
+    ]
+
+
+def _cached_level_matches(entry, level: int, value) -> bool:
+    """True when a peeked cache entry's two-level ``[fast, content]``
+    fingerprint matches ``value`` at the given level."""
+    return bool(
+        entry
+        and isinstance(entry[0], list)
+        and len(entry[0]) == 2
+        and entry[0][level] == value
+    )
+
+
+def _store_content_fingerprint(conn: sqlite3.Connection, path: Path) -> list:
+    """Cheap content identity for one store.db: blob count, last rowid, total
+    and largest payload bytes, the raw meta row, and the sidecar meta.json
+    identity.
+
+    Costs a few milliseconds, versus ~1.5s for the full blob scan a summary
+    needs — so a store whose mtime was touched without a real change (another
+    process, a backup tool, a cache fingerprint format change) revalidates
+    cheaply instead of forcing the scan.
+    """
+    try:
+        n, last, total, largest = conn.execute(
+            "SELECT count(*), coalesce(max(rowid), 0), coalesce(sum(length(data)), 0),"
+            " coalesce(max(length(data)), 0) FROM blobs"
+        ).fetchone()
+    except sqlite3.Error:
+        n = last = total = largest = -1
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key='0'").fetchone()
+        meta_raw = row[0] if row else b""
+        if isinstance(meta_raw, bytes):
+            meta_raw = meta_raw.decode("utf-8", errors="ignore")
+    except sqlite3.Error:
+        meta_raw = ""
+    sidecar = common.file_identity(path.parent / "meta.json")
+    return [n, last, total, largest, str(meta_raw), list(sidecar) if sidecar else None]
+
+
+def _cli_store_summary_uncached(conn: sqlite3.Connection, path: Path) -> dict:
+    header = _store_header(conn, path)
+    meta, side = header["meta"], header["side"]
+    subagent_fields = header["subagent_fields"]
+    created = meta.get("createdAt") or side.get("createdAtMs")
+    updated = side.get("updatedAtMs") or created
+
+    n_user = n_assistant = n_tool = 0
+    first_user = ""
+    for msg in _iter_store_role_messages(conn):
+        role = msg.get("role")
+        content = msg.get("content")
+        if role == "user":
+            text = _store_user_text(content)
+            cleaned = _store_prompt_text(text)
+            if cleaned and "<user_info>" not in text:
+                n_user += 1
+                if not first_user:
+                    first_user = cleaned
+            elif _CLI_SYSTEM_REMINDER_RE.search(text) and not _CLI_USER_QUERY_RE.search(text):
+                pass  # mode notices don't count as user prompts
+        elif role == "assistant":
+            n_assistant += 1
+            if isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "tool-call":
+                        n_tool += 1
+
+    summary = common.make_summary(
+        agent="cursor",
+        cursor_source="cli",
+        id=header["session_id"],
+        file=CLI_SESSION_SCHEME + header["session_id"],
+        title=_store_title(header["title"], first_user, subagent_fields),
+        cwd=header["cwd"],
+        first_ts=_iso_from_ms(created),
+        last_ts=_iso_from_ms(updated),
+        n_user=n_user,
+        n_assistant=n_assistant,
+        n_tool=n_tool,
+        n_records=n_user + n_assistant + n_tool,
+        model=header["model"],
+        mtime=_store_db_mtime(path),
+    )
+    summary.update(subagent_fields)
+    return summary
+
+
+def cli_store_summary(path: Path) -> dict | None:
+    """Lightweight metadata for one CLI store.db.
+
+    Two-level cache: the fast fingerprint is stat-only (store.db, its WAL,
+    and the meta.json sidecar); when that misses, a cheap in-database content
+    fingerprint is compared before paying for the full blob scan. Fingerprints
+    are stored as ``[fast, content]`` so either level can validate an entry.
+    """
+    key = str(path)
+    fast = _store_fast_fingerprint(path)
+    if fast is None:
+        return None
+    entry = SUMMARY_CACHE.peek(key)
+    if _cached_level_matches(entry, 0, fast):
+        return dict(entry[1])
+
+    conn = _open_store(path)
+    if conn is None:
+        return None
+    try:
+        content = _store_content_fingerprint(conn, path)
+        if _cached_level_matches(entry, 1, content):
+            # Only the mtime moved; the store's content is unchanged. Reuse the
+            # summary, but refresh its recency from the file (a full recompute
+            # would have picked the new mtime up, and the sidebar sorts by it)
+            # along with the fast fingerprint for the next poll.
+            summary = dict(entry[1])
+            summary["mtime"] = _store_db_mtime(path)
+            SUMMARY_CACHE.put(key, [fast, content], summary)
+            return summary
+        summary = _cli_store_summary_uncached(conn, path)
+        SUMMARY_CACHE.put(key, [fast, content], summary)
         return summary
     finally:
         conn.close()
 
 
-def cli_store_summary(path: Path) -> dict | None:
-    """Lightweight metadata for one CLI store.db, cached by mtime/size."""
-    key = str(path)
-    st = common.safe_stat(path)
-    identity = (st.st_mtime, st.st_size) if st else None
-    if identity is not None:
-        cached = SUMMARY_CACHE.get(key, identity)
-        if cached is not None:
-            return cached
-    summary = _cli_store_summary_uncached(path)
-    if summary is not None and identity is not None:
-        SUMMARY_CACHE.put(key, identity, summary)
-    return summary
-
-
-def _iter_cli_store_summaries(skip_ids: set[str] | None = None):
-    skip = skip_ids or set()
+def _iter_cli_store_summaries():
     for path in _cli_store_paths():
         try:
             summary = cli_store_summary(path)
         except (OSError, ValueError, sqlite3.Error):
             continue
-        if not summary or summary.get("id") in skip:
-            continue
-        yield summary
+        if summary:
+            yield summary
 
 
 def _tool_result_text(result) -> str:
@@ -1331,26 +1512,21 @@ def _tool_result_text(result) -> str:
 
 def parse_cli_store(path: Path) -> dict | None:
     """Full structured parse of a Cursor CLI store.db into Claude-shaped events."""
-    if not path.exists():
+    conn = _open_store(path)
+    if conn is None:
         return None
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
-    except sqlite3.Error:
-        return None
-    try:
-        meta = _read_store_meta(conn)
-        side = _read_sidecar_meta(path)
-        session_id = meta.get("agentId") or path.parent.name
-        model = meta.get("lastUsedModel") or ""
-        title = (meta.get("name") or side.get("title") or "").strip()
-        cwd = (side.get("cwd") or "").strip()
-        subagent_fields = _store_subagent_fields(meta)
+        header = _store_header(conn, path)
+        session_id = header["session_id"]
+        model = header["model"]
+        cwd = header["cwd"]
+        subagent_fields = header["subagent_fields"]
 
         messages = list(_iter_store_role_messages(conn))
 
         # First pass: collect tool results by toolCallId.
         results: dict[str, dict] = {}
-        for _rowid, msg in messages:
+        for msg in messages:
             if msg.get("role") != "tool":
                 continue
             content = msg.get("content")
@@ -1370,7 +1546,7 @@ def parse_cli_store(path: Path) -> dict | None:
 
         events: list[dict] = []
         first_user = ""
-        for _rowid, msg in messages:
+        for msg in messages:
             role = msg.get("role")
             content = msg.get("content")
 
@@ -1463,13 +1639,7 @@ def parse_cli_store(path: Path) -> dict | None:
                 }
             )
 
-        if subagent_fields and (not title or title == "New Agent"):
-            task_title = _store_subagent_title(first_user)
-            title = common.short_title(
-                f"[{subagent_fields['subagent_type']}] {task_title or first_user or '(sub-agent)'}"
-            )
-        elif not title:
-            title = common.short_title(first_user) or "(untitled session)"
+        title = _store_title(header["title"], first_user, subagent_fields)
         out_meta = {}
         if cwd:
             out_meta["cwd"] = cwd

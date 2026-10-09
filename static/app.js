@@ -17,13 +17,22 @@ function el(tag, attrs = {}, ...kids) {
   }
   return n;
 }
+// Chevron head for a collapsed-by-default block: clicking it toggles the
+// block, and the shared .collapsible class carries the collapse CSS.
+function toggleHead(block, cls, ...kids) {
+  block.classList.add("collapsible");
+  const head = el("div", { class: cls }, el("span", { class: "chev" }, "▼"), ...kids);
+  head.addEventListener("click", () => block.classList.toggle("collapsed"));
+  return head;
+}
+
 const esc = (s) => (s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 // ---------- theme picker ----------
 const THEMES = [
   { id: "warm", name: "Warm", colors: ["#fffdfa", "#efe8dc", "#c0492a"] },
   { id: "paper", name: "Paper", colors: ["#ffffff", "#e9ecef", "#315ca8"] },
-  { id: "botanical", name: "Botanical", colors: ["#f8faf6", "#e2e8dd", "#586f5b"] },
+  { id: "botanical", name: "Botanical", colors: ["#fbf8ee", "#e8ddbe", "#174f3a"] },
   { id: "lavender", name: "Lavender", colors: ["#faf9fc", "#e6e1e9", "#65557b"] },
   { id: "sorbet", name: "Sorbet", colors: ["#fff9f5", "#eddcd7", "#8e4b61"] },
   { id: "night", name: "Night", colors: ["#171a1f", "#292e37", "#e07a5f"] },
@@ -33,6 +42,8 @@ const THEMES = [
   { id: "system7", name: "System 7", colors: ["#f7f7f7", "#d7d7d7", "#111111"] },
   { id: "bauhaus", name: "Bauhaus", colors: ["#f7f2e7", "#d9b52f", "#962f2f"] },
   { id: "artdeco", name: "Art Deco", colors: ["#faf7ed", "#d8c99f", "#73591f"] },
+  { id: "riso", name: "Riso", colors: ["#fdf8ef", "#5fcfc4", "#c42a66"] },
+  { id: "synthwave", name: "Synthwave", colors: ["#1b1030", "#5ce1e6", "#ff6ad5"] },
 ];
 
 function currentTheme() {
@@ -165,22 +176,26 @@ function localFileLinkTarget(anchor, cwd) {
   return { path: href, line };
 }
 
+// Send JSON to a server endpoint; throws with the server's error message.
+async function requestJson(url, body, method = "POST") {
+  const res = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const result = await res.json();
+  if (!res.ok || result.error) throw new Error(result.error || `HTTP ${res.status}`);
+  return result;
+}
+
 async function openLocalFileLink(event, anchor, target) {
   event.preventDefault();
   if (anchor.dataset.opening === "1") return;
   anchor.dataset.opening = "1";
   anchor.classList.add("opening");
   try {
-    const res = await fetch("/api/open-local", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file: CURRENT_FILE, path: target.path }),
-    });
-    const result = await res.json();
-    if (!res.ok || result.error) throw new Error(result.error || `HTTP ${res.status}`);
-    anchor.classList.add("opened");
+    const result = await requestJson("/api/open-local", { file: CURRENT_FILE, path: target.path });
     anchor.title = "Opened with the default app: " + result.opened;
-    setTimeout(() => anchor.classList.remove("opened"), 1400);
   } catch (error) {
     window.alert("Could not open local file: " + String(error));
   } finally {
@@ -189,23 +204,19 @@ async function openLocalFileLink(event, anchor, target) {
   }
 }
 
-// Reveal the transcript's own .jsonl in Finder. Cursor IDE/CLI database
-// sessions have no file on disk, so the button is only rendered for real paths.
+// Session ids that name a database row rather than a transcript file on disk
+// (Cursor IDE/CLI and opencode) — nothing to reveal in Finder, nothing to stat.
+const SYNTHETIC_ID_RE = /^(cursordb|cursorcli|opencode):/;
+
 function hasTranscriptFile(file) {
-  return typeof file === "string" && !!file && !/^cursor(db|cli):/.test(file);
+  return typeof file === "string" && !!file && !SYNTHETIC_ID_RE.test(file);
 }
 
 async function revealTranscriptFile(button, file) {
   if (button.dataset.opening === "1") return;
   button.dataset.opening = "1";
   try {
-    const res = await fetch("/api/reveal-transcript", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file }),
-    });
-    const result = await res.json();
-    if (!res.ok || result.error) throw new Error(result.error || `HTTP ${res.status}`);
+    await requestJson("/api/reveal-transcript", { file });
   } catch (error) {
     window.alert("Could not reveal transcript file: " + String(error));
   } finally {
@@ -219,6 +230,13 @@ function decorateMarkdownLinks(container, data) {
     const local = localFileLinkTarget(anchor, cwd);
     if (local) {
       anchor.classList.add("local-file-link");
+      // Nothing can open a file on the author's machine from a shared export,
+      // so the link becomes a labelled, unclickable path.
+      if (STANDALONE) {
+        anchor.removeAttribute("href");
+        anchor.title = "Local path on the original machine: " + local.path;
+        return;
+      }
       anchor.href = "#";
       anchor.setAttribute("role", "button");
       anchor.title = "Open with the default app: " + local.path
@@ -257,17 +275,40 @@ function relDays(ts) {
   if (days < 30) return days + "d ago";
   return fmtDateOnly(ts);
 }
+// opencode qualifies every model with the provider it was routed through
+// ("openrouter/x-ai/grok-4.6"). The provider is the same for a whole session
+// list and just crowds the label, so drop that leading segment.
+function stripProvider(m) {
+  const s = String(m || "");
+  const cut = s.indexOf("/");
+  return cut === -1 ? s : s.slice(cut + 1);
+}
 function shortModel(m) {
   if (!m) return "";
-  return String(m)
+  return stripProvider(m)
     .replace(/^claude-/, "")
     .replace(/-\d{8}$/, "")
     .replace(/\[1m\]$/, " (1M)")
     .replace(/-codex$/, "");
 }
+// The agent / sub-agent / CLI badge trio shown before a session title, in the
+// sidebar and in the transcript header. `s` is a summary or a parsed session.
+function agentTags(s) {
+  return [
+    el("span", { class: "agent-tag agent-" + s.agent }, agentLabel(s.agent)),
+    s.is_subagent
+      ? el("span", { class: "sidechain-tag" }, s.subagent_type === "guardian" ? "guardian" : "sub-agent")
+      : null,
+    s.cursor_source && String(s.cursor_source).startsWith("cli") && !s.is_subagent
+      ? el("span", { class: "sidechain-tag", title: "Cursor CLI agent transcript" }, "CLI")
+      : null,
+  ];
+}
+
 function agentLabel(a) {
   if (a === "codex") return "Codex";
   if (a === "cursor") return "Cursor";
+  if (a === "opencode") return "opencode";
   return "Claude";
 }
 function shortPath(p) {
@@ -281,6 +322,50 @@ function fmtDuration(ms) {
   return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + "s";
 }
 
+// ---------- standalone export mode ----------
+// A saved single-file transcript (see export_html.py) embeds its session here.
+// Such a page has no server behind it, so everything that would call one is
+// switched off and the session list is dropped; rendering is otherwise
+// identical, which is the whole reason the export reuses this file.
+const EXPORT_DATA = window.__TRANSCRIPT_EXPORT__ || null;
+const STANDALONE = !!EXPORT_DATA;
+
+// ---------- recommended recording settings (independent of Mica) ----------
+const SETUP_DISMISS_KEY = "transcript-viewer:setup-dismissed";
+let SETUP_DISMISSED = "";
+let SETUP_RENDERED = null;
+try { SETUP_DISMISSED = localStorage.getItem(SETUP_DISMISS_KEY) || ""; } catch (_error) {}
+
+function renderSetupBanner(setup) {
+  const box = $("#setup-banner");
+  if (!box || STANDALONE) return;
+  const issues = (setup && setup.issues) || [];
+  const sig = JSON.stringify(issues);
+  // Once settings are fixed, a later regression should produce a new warning.
+  if (!issues.length && SETUP_DISMISSED) {
+    SETUP_DISMISSED = "";
+    try { localStorage.removeItem(SETUP_DISMISS_KEY); } catch (_error) {}
+  }
+  box.hidden = !issues.length || sig === SETUP_DISMISSED;
+  if (box.hidden || sig === SETUP_RENDERED) return;
+  SETUP_RENDERED = sig;
+  box.replaceChildren(
+    el("div", { class: "setup-banner-body" },
+      el("strong", {}, "Recommended transcript settings are missing or differ:"),
+      el("ul", {}, issues.map((item) => el("li", {},
+        `${item.agent}: set `,
+        el("code", {}, item.setting + " = " + JSON.stringify(item.recommended)),
+        " in ", el("code", {}, item.path), ". " + item.reason))),
+      el("span", { class: "muted" }, "These settings affect future recording. Restart the agent after changing them.")),
+    el("button", { class: "setup-dismiss", type: "button", title: "Dismiss settings reminder",
+      "aria-label": "Dismiss settings reminder", onclick: () => {
+        SETUP_DISMISSED = sig;
+        try { localStorage.setItem(SETUP_DISMISS_KEY, sig); } catch (_error) {}
+        box.hidden = true;
+      } }, "×")
+  );
+}
+
 // ---------- state ----------
 let SESSIONS = [];
 let SESSIONS_LOADED = false;
@@ -288,6 +373,9 @@ let CURRENT_FILE = null;
 let CURRENT_DATA = null;
 let CURRENT_AGENT = "claude";
 let AGENT_FILTER = "all";
+let MICA_STATUS = { enabled: false }; // mica heartbeat, from /api/sessions
+let FLAGGED_ONLY = false;             // sidebar shows only mica-flagged sessions
+let MICA_COMPARE = null;             // { file, sig, result } of the open transcript
 // ---------- live auto-refresh (always on) ----------
 const SIDEBAR_POLL_MS = 1000;    // heavier scan across every transcript source
 const TRANSCRIPT_POLL_MS = 300;  // cheap stat of the open on-disk transcript
@@ -310,6 +398,8 @@ const SELECTED_DOMAINS = new Set();
 let PASSED_ONLY = false;
 // Show only contaminated (invalid-result) runs.
 let CONTAM_ONLY = false;
+// Inclusive local-date range over a session's last activity; "" = unbounded.
+const DATE_FILTER = { from: "", to: "" };
 // Parent session file keys whose linked subagent subtrees are hidden.
 // Kept outside renderSidebar so live polling does not reopen collapsed groups.
 const COLLAPSED_SUBAGENT_PARENTS = new Set();
@@ -320,16 +410,22 @@ async function loadSessions() {
   const data = await res.json();
   SESSIONS = data.sessions || [];
   SESSIONS_LOADED = true;
+  MICA_STATUS = data.mica || { enabled: false };
+  renderSetupBanner(data.setup);
   LAST_SIG = sessionsSignature(SESSIONS);
   buildFilters();
   renderSidebar($("#search").value || "");
+  renderMicaStatus();
 }
 
 // Cheap fingerprint of the session list: changes whenever a file is added,
 // removed, or rewritten (mtime bumps). Lets the poller skip needless rebuilds.
 function sessionsSignature(list) {
   let sig = list.length + "|";
-  for (const s of list) sig += s.file + ":" + (s.mtime || 0) + ":" + (s.custom_title || "") + ";";
+  for (const s of list) {
+    sig += s.file + ":" + (s.mtime || 0) + ":" + (s.custom_title || "") + ":" + (s.ai_title || "") +
+      ":" + (s.mica ? s.mica.state + "/" + s.mica.flags.join(",") : "") + ";";
+  }
   return sig;
 }
 
@@ -347,12 +443,32 @@ function statusClass(s) {
   return "warn";
 }
 
-// ---------- dropdown filters (model / directory) ----------
+// ---------- dropdown filters (model / directory / date) ----------
 function modelFamily(m) {
-  const s = String(m || "").toLowerCase();
+  // Match on the bare model id so provider-qualified opencode models
+  // ("openrouter/anthropic/claude-opus-4") land in the same family as bare ones.
+  const s = String(m || "").toLowerCase().split("/").pop();
   if (s.startsWith("claude")) return "Claude";
   if (s.startsWith("gpt") || s.includes("codex") || s.startsWith("o1") || s.startsWith("o3")) return "GPT";
   return "Other";
+}
+
+// Shared shell of every filter dropdown: labelled button, count span, panel,
+// and the open-one-close-the-rest wiring.
+function dropdownShell(title, panelClass = "dropdown-panel hidden") {
+  const wrap = el("div", { class: "dropdown" });
+  const count = el("span", { class: "dropdown-count" });
+  const btn = el("button", { class: "dropdown-btn" }, title, count, el("span", { class: "chev" }, "▾"));
+  const panel = el("div", { class: panelClass });
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = !panel.classList.contains("hidden");
+    $$(".dropdown-panel").forEach((p) => p.classList.add("hidden"));
+    panel.classList.toggle("hidden", open);
+  });
+  panel.addEventListener("click", (e) => e.stopPropagation());
+  wrap.append(btn, panel);
+  return { wrap, count, panel };
 }
 
 // Generic multi-select dropdown.
@@ -360,10 +476,7 @@ function modelFamily(m) {
 //   selected: a Set the dropdown reads from and writes to
 //   onChange: called after any change
 function makeDropdown(title, groups, selected, onChange) {
-  const wrap = el("div", { class: "dropdown" });
-  const count = el("span", { class: "dropdown-count" });
-  const btn = el("button", { class: "dropdown-btn" }, title, count, el("span", { class: "chev" }, "▾"));
-  const panel = el("div", { class: "dropdown-panel hidden" });
+  const { wrap, count, panel } = dropdownShell(title);
 
   const updateCount = () => { count.textContent = selected.size ? ` (${selected.size})` : ""; };
 
@@ -413,20 +526,90 @@ function makeDropdown(title, groups, selected, onChange) {
   });
   panel.append(clear);
 
-  btn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    const open = !panel.classList.contains("hidden");
-    $$(".dropdown-panel").forEach((p) => p.classList.add("hidden"));
-    panel.classList.toggle("hidden", open);
-  });
-  panel.addEventListener("click", (e) => e.stopPropagation());
-
   updateCount();
-  wrap.append(btn, panel);
   return wrap;
 }
 
+// Local calendar day of an epoch-seconds timestamp, as sortable "YYYY-MM-DD".
+function dayOf(mtime) {
+  const d = new Date((mtime || 0) * 1000);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") +
+    "-" + String(d.getDate()).padStart(2, "0");
+}
+
+// "YYYY-MM-DD" for the day `back` days before today.
+function dayAgo(back) {
+  return dayOf(Date.now() / 1000 - back * 86400);
+}
+
+function makeDateDropdown(onChange) {
+  const { wrap, count, panel } = dropdownShell("Date", "dropdown-panel anchor-right hidden");
+
+  const fromInput = el("input", { type: "date" });
+  const toInput = el("input", { type: "date" });
+  fromInput.value = DATE_FILTER.from;
+  toInput.value = DATE_FILTER.to;
+
+  const shortDay = (day) => {
+    const [y, m, d] = day.split("-");
+    return Number(m) + "/" + Number(d);
+  };
+  const updateCount = () => {
+    const { from, to } = DATE_FILTER;
+    count.textContent =
+      from && to ? ` (${shortDay(from)}–${shortDay(to)})`
+      : from ? ` (≥ ${shortDay(from)})`
+      : to ? ` (≤ ${shortDay(to)})`
+      : "";
+  };
+  const apply = () => {
+    DATE_FILTER.from = fromInput.value || "";
+    DATE_FILTER.to = toInput.value || "";
+    updateCount(); onChange();
+  };
+  fromInput.addEventListener("change", apply);
+  toInput.addEventListener("change", apply);
+
+  panel.append(
+    el("label", { class: "dd-date-row" }, "From", fromInput),
+    el("label", { class: "dd-date-row" }, "To", toInput)
+  );
+
+  const preset = (label, back) => {
+    const b = el("button", { class: "dd-preset" }, label);
+    b.addEventListener("click", () => {
+      fromInput.value = dayAgo(back);
+      toInput.value = "";
+      apply();
+    });
+    return b;
+  };
+  panel.append(el("div", { class: "dd-presets" },
+    preset("Today", 0), preset("7 days", 7), preset("30 days", 30)));
+
+  const clear = el("button", { class: "dd-clear" }, "Clear");
+  clear.addEventListener("click", () => {
+    fromInput.value = toInput.value = "";
+    apply();
+  });
+  panel.append(clear);
+
+  updateCount();
+  return wrap;
+}
+
+// The dropdowns' option sets. Rebuilding the dropdowns closes any open panel,
+// so the live poller only rebuilds when an option actually appeared or
+// vanished — not on every session-list change.
+let FILTER_OPTIONS_SIG = "";
+function filterOptionsSignature() {
+  const models = [...new Set(SESSIONS.map((s) => s.model).filter(Boolean))].sort();
+  const dirs = [...new Set(SESSIONS.map((s) => s.cwd).filter(Boolean))].sort();
+  return JSON.stringify([models, dirs]);
+}
+
 function buildFilters() {
+  FILTER_OPTIONS_SIG = filterOptionsSignature();
   const host = $("#filter-dropdowns");
   host.innerHTML = "";
   // In run mode the round Model/Domain filters (below) are the meaningful ones;
@@ -515,6 +698,8 @@ function buildFilters() {
     const items = dirs.map((d) => ({ value: d, label: shortPath(d) }));
     host.append(makeDropdown("Directory", [{ label: "", items }], SELECTED_DIRS, () => renderSidebar($("#search").value)));
   }
+
+  host.append(makeDateDropdown(() => renderSidebar($("#search").value)));
 }
 
 function renderSidebar(query) {
@@ -531,7 +716,6 @@ function renderSidebar(query) {
     list.append(el("div", { class: "sidebar-hint" },
       "Pick a Model (then Domain) above to list its runs. " +
       SESSIONS.length + " transcripts hidden."));
-    $("#sidebar-stats").textContent = SESSIONS.length + " transcripts · pick a Model to begin";
     return;
   }
 
@@ -539,10 +723,12 @@ function renderSidebar(query) {
   const passedFiles = PASSED_ONLY ? new Set(SESSIONS.filter((s) => s.passed).map((s) => s.file)) : null;
   const contamFiles = CONTAM_ONLY ? new Set(SESSIONS.filter((s) => s.contaminated).map((s) => s.file)) : null;
 
-  const matches = SESSIONS.filter((s) => {
+  // Every filter except the agent chips, which are handled by the caller —
+  // the chips display counts of what selecting them would show.
+  const matchesFilters = (s) => {
     if (PASSED_ONLY && !s.passed && !passedFiles.has(s.parent_file)) return false;
     if (CONTAM_ONLY && !s.contaminated && !contamFiles.has(s.parent_file)) return false;
-    if (AGENT_FILTER !== "all" && s.agent !== AGENT_FILTER) return false;
+    if (FLAGGED_ONLY && !isMicaFlagged(s)) return false;
     if (SELECTED_MODELS.size && !SELECTED_MODELS.has(s.model || "")) return false;
     if (SELECTED_DIRS.size && !SELECTED_DIRS.has(s.cwd || "")) return false;
     if (SELECTED_TEAMS.size && !SELECTED_TEAMS.has(s.team || "")) return false;
@@ -550,6 +736,12 @@ function renderSidebar(query) {
     if (SELECTED_RUNS.size && !SELECTED_RUNS.has(s.run || "")) return false;
     if (SELECTED_RMODELS.size && !SELECTED_RMODELS.has(s.round_model || "")) return false;
     if (SELECTED_DOMAINS.size && !SELECTED_DOMAINS.has(s.domain || "")) return false;
+    if (DATE_FILTER.from || DATE_FILTER.to) {
+      // Same recency the row displays: last activity, not file mtime.
+      const day = dayOf(s.last_ts ? Date.parse(s.last_ts) / 1000 : s.mtime);
+      if (DATE_FILTER.from && day < DATE_FILTER.from) return false;
+      if (DATE_FILTER.to && day > DATE_FILTER.to) return false;
+    }
     if (!q) return true;
     const metaHit = (
       s.title + " " + (s.original_title || "") + " " + (s.ai_title || "") + " " +
@@ -557,7 +749,10 @@ function renderSidebar(query) {
     ).toLowerCase().includes(q);
     const contentHit = CONTENT_MATCHES && CONTENT_MATCHES.has(s.file);
     return metaHit || contentHit;
-  });
+  };
+  const matches = SESSIONS.filter(
+    (s) => (AGENT_FILTER === "all" || s.agent === AGENT_FILTER) && matchesFilters(s)
+  );
 
   // With an active query, order by relevance score; otherwise keep the
   // server's newest-first ordering.
@@ -569,11 +764,22 @@ function renderSidebar(query) {
     matches.sort((a, b) => (scoreOf(b) - scoreOf(a)) || ((b.mtime || 0) - (a.mtime || 0)));
   }
 
-  const nClaude = matches.filter((s) => s.agent === "claude").length;
-  const nCodex = matches.filter((s) => s.agent === "codex").length;
-  const nCursor = matches.filter((s) => s.agent === "cursor").length;
-  $("#sidebar-stats").textContent =
-    `${matches.length} sessions · ${nClaude} Claude · ${nCodex} Codex · ${nCursor} Cursor`;
+  // Per-agent counts ride on the filter chips, counted against every filter
+  // except the agent chip itself (collapsed sub-agent groups still count —
+  // collapsing hides rows, it doesn't exclude sessions). The chips make a
+  // separate totals line redundant.
+  const chipEligible = SESSIONS.filter(matchesFilters);
+  for (const chip of $$("#filter-row .filter-chip")) {
+    const a = chip.dataset.agent;
+    const n = a === "all" ? chipEligible.length : chipEligible.filter((s) => s.agent === a).length;
+    chip.replaceChildren(
+      a === "all" ? "All" : agentLabel(a),
+      el("span", { class: "chip-count" }, String(n))
+    );
+    // An agent with nothing to show contributes only clutter — but never hide
+    // "All" or the selected chip (the way back out of a filter).
+    chip.hidden = n === 0 && a !== "all" && a !== AGENT_FILTER;
+  }
 
   const matchedByFile = new Map(matches.map((s) => [s.file, s]));
   const subagentCounts = new Map();
@@ -631,8 +837,9 @@ function renderSidebar(query) {
       el(
         "div",
         { class: "session-toprow" },
-        // Run mode leads with the round + run number and drops the (uniform) agent tag.
-        !s.run ? el("span", { class: "agent-tag agent-" + s.agent }, agentLabel(s.agent)) : null,
+        // Run mode leads with the round + run number and drops the (uniform) agent tag;
+        // its role tag stands in for the generic sub-agent tag.
+        ...(s.run ? [] : agentTags(s)),
         s.round && !s.is_subagent
           ? el("span", { class: "round-tag", title: "Round " + s.round }, s.round)
           : null,
@@ -648,20 +855,14 @@ function renderSidebar(query) {
         s.team
           ? el("span", { class: "team-tag team-" + s.team, title: "Team " + s.team + (s.pod ? " · pod " + s.pod : "") }, s.team)
           : (s.pod ? el("span", { class: "team-tag team-unknown", title: "Pod " + s.pod }, s.pod) : null),
-        s.role
-          ? el("span", { class: "role-tag" }, s.role)
-          : (s.is_subagent
-              ? el("span", { class: "sidechain-tag" }, s.subagent_type === "guardian" ? "guardian" : "sub-agent")
-              : null),
+        s.role ? el("span", { class: "role-tag" }, s.role) : null,
         s.red_lost
           ? el("span", { class: "lost-tag", title: "Red agent transcript was not harvested before the pod was shut down" }, "LOST")
           : null,
         s.status
           ? el("span", { class: "status-tag status-" + statusClass(s.status), title: "Run outcome: " + s.status }, s.status)
           : null,
-        s.cursor_source && String(s.cursor_source).startsWith("cli") && !s.is_subagent
-          ? el("span", { class: "sidechain-tag", title: "Cursor CLI agent transcript" }, "CLI")
-          : null,
+        micaTag(s),
         el("span", { class: "session-title" }, s.title)
       ),
       s.cwd ? el("div", { class: "session-cwd", title: s.cwd }, shortPath(s.cwd)) : null,
@@ -693,7 +894,11 @@ function renderSidebar(query) {
   }
 
   if (!list.children.length) {
-    const message = q
+    // "No transcripts found" is only true when nothing is filtered out —
+    // an active chip/model/directory/date filter empties the list too.
+    const filtered = AGENT_FILTER !== "all" || FLAGGED_ONLY || SELECTED_MODELS.size ||
+      SELECTED_DIRS.size || DATE_FILTER.from || DATE_FILTER.to;
+    const message = q || filtered
       ? "No matching sessions."
       : SESSIONS_LOADED
         ? "No transcripts found."
@@ -702,14 +907,16 @@ function renderSidebar(query) {
   }
 }
 
+// Briefly show `text` on a control, then put its label back.
+function flashLabel(node, text, ms, restore = node.textContent) {
+  node.textContent = text;
+  setTimeout(() => { node.textContent = restore; }, ms);
+}
+
 function copyId(e, id) {
   e.stopPropagation();
   const node = e.currentTarget;
-  const restore = node.textContent;
-  navigator.clipboard?.writeText(id).then(
-    () => { node.textContent = "copied ✓"; setTimeout(() => (node.textContent = restore), 900); },
-    () => {}
-  );
+  navigator.clipboard?.writeText(id).then(() => flashLabel(node, "copied ✓", 900), () => {});
 }
 
 const COPY_ALLOWED_KINDS = new Set(["user", "assistant", "reasoning", "tool"]);
@@ -727,15 +934,11 @@ function appendCopyEvent(lines, ev, branchLabel = "") {
   // Skip system messages, tool results, and other non-conversational noise.
   if (!COPY_ALLOWED_KINDS.has(ev.kind)) return;
 
-  const labels = {
-    user: "User", assistant: "Assistant", reasoning: "Reasoning",
-    tool: "Tool", web_search: "Web search", web_call: "Web search",
-    instructions: "Instructions", system: "System", notice: "Notice",
-    attachment: "Attachment", guardian_request: "Review input",
-    guardian_decision: "Review decision", status: "Status", context: "Context",
-    tokens: "Token usage", raw: "Raw event",
-  };
-  const details = [ev.model, ev.phase, ev.status, branchLabel].filter(Boolean);
+  const labels = { user: "User", assistant: "Assistant", reasoning: "Reasoning", tool: "Tool" };
+  // Same rule as the turn headers: "<synthetic>" is Claude Code's placeholder
+  // on machine-written records, not a model worth naming in copied text.
+  const details = [ev.model !== "<synthetic>" && ev.model, ev.phase, ev.status, branchLabel]
+    .filter(Boolean);
   lines.push("## " + (labels[ev.kind] || ev.kind || "Event") + (details.length ? " · " + details.join(" · ") : ""));
 
   if (Array.isArray(ev.blocks)) {
@@ -758,27 +961,6 @@ function appendCopyEvent(lines, ev, branchLabel = "") {
   if (ev.kind === "tool") {
     lines.push("Tool: " + (ev.name || "tool"));
     lines.push(...toolCallToText(ev.name, ev.input));
-  } else if (ev.kind === "guardian_request") {
-    if (ev.context) lines.push(ev.context);
-    lines.push(JSON.stringify(ev.request || {}, null, 2));
-  } else if (ev.kind === "guardian_decision") {
-    lines.push([
-      String(ev.outcome || "").toUpperCase(),
-      ev.risk_level && "risk: " + ev.risk_level,
-      ev.user_authorization && "user authorization: " + ev.user_authorization,
-    ].filter(Boolean).join(" · "));
-    if (ev.rationale) lines.push(ev.rationale);
-  } else if (ev.kind === "web_search" || ev.kind === "web_call") {
-    const queries = ev.action && Array.isArray(ev.action.queries) ? ev.action.queries : [ev.query || ev.action?.query].filter(Boolean);
-    lines.push(...queries);
-  } else if (ev.kind === "attachment") {
-    const name = ev.display_path || ev.filename;
-    if (name) lines.push(name);
-    if (ev.command) lines.push("$ " + ev.command);
-    lines.push(...[ev.content, ev.stdout, ev.stderr].filter(Boolean));
-  } else if (["status", "context", "tokens", "raw"].includes(ev.kind)) {
-    const payload = ev.kind === "raw" ? ev.payload : ev;
-    lines.push(JSON.stringify(payload || {}, null, 2));
   }
   for (const _image of ev.images || []) lines.push("[image]");
   for (const image of ev.local_images || []) lines.push("[local image: " + image + "]");
@@ -809,14 +991,52 @@ async function writeClipboard(text) {
 
 async function copyAll(e) {
   const button = e.currentTarget;
-  const original = button.textContent;
   try {
     await writeClipboard(transcriptToText(CURRENT_DATA || {}));
-    button.textContent = "Copied";
+    flashLabel(button, "Copied", 1200);
   } catch (_error) {
-    button.textContent = "Copy failed";
+    flashLabel(button, "Copy failed", 1200);
   }
-  setTimeout(() => { button.textContent = original; }, 1200);
+}
+
+// Content-Disposition: attachment; filename="foo.html"  ->  foo.html
+function filenameFromDisposition(header) {
+  const m = /filename="([^"]+)"/.exec(header || "");
+  return m ? m[1] : "";
+}
+
+// Download the open transcript as one self-contained HTML file: the viewer's
+// own UI with this session baked in, shareable without the server or the
+// original ~/.claude / ~/.codex / database it was read from.
+async function saveTranscriptHtml(e) {
+  const button = e.currentTarget;
+  const original = button.textContent;
+  if (button.dataset.saving === "1") return;
+  button.dataset.saving = "1";
+  button.textContent = "Saving…";
+  try {
+    const res = await fetch("/api/export?file=" + encodeURIComponent(CURRENT_FILE));
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try { detail = (await res.json()).error || detail; } catch (_error) {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const name = filenameFromDisposition(res.headers.get("Content-Disposition")) || "transcript.html";
+    const url = URL.createObjectURL(blob);
+    const anchor = el("a", { href: url, download: name });
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    // Revoked late: Safari cancels the download if the blob dies too early.
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    flashLabel(button, "Saved", 1400, original);
+  } catch (error) {
+    button.title = "Could not save transcript: " + String(error);
+    flashLabel(button, "Save failed", 1400, original);
+  } finally {
+    button.dataset.saving = "0";
+  }
 }
 
 function setPanelCollapsed(panel, collapsed) {
@@ -842,20 +1062,14 @@ async function renameSession(data) {
   );
   if (entered === null) return;
   try {
-    const res = await fetch("/api/session-name", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file, name: entered }),
-    });
-    const result = await res.json();
-    if (!res.ok || result.error) throw new Error(result.error || `HTTP ${res.status}`);
+    const result = await requestJson("/api/session-name", { file, name: entered }, "PUT");
     Object.assign(data, result);
     const summary = SESSIONS.find((s) => s.file === file);
     if (summary) Object.assign(summary, result);
     LAST_SIG = sessionsSignature(SESSIONS);
     await runSearch($("#search").value);
     markActive();
-    if (CURRENT_FILE === file) await renderTranscript(data, { keepScroll: true });
+    if (CURRENT_FILE === file) await renderTranscript(data, { live: true });
   } catch (e) {
     window.alert("Could not save transcript name: " + String(e));
   }
@@ -909,6 +1123,7 @@ function showSessionContextMenu(e, file) {
 }
 
 async function openSession(file, itemEl) {
+  if (STANDALONE) return;
   CURRENT_FILE = file;
   location.hash = "file=" + encodeURIComponent(file);
   $$(".session-item.active").forEach((n) => n.classList.remove("active"));
@@ -923,24 +1138,28 @@ async function openSession(file, itemEl) {
   $("#nav-buttons").hidden = true;
   const t = $("#transcript");
   t.hidden = false;
-  t.innerHTML = `<div class="spinner">Loading transcript…</div>`;
+  t.replaceChildren(el("div", { class: "spinner" }, "Loading transcript…"));
 
   try {
     const res = await fetch("/api/session?file=" + encodeURIComponent(file));
     const data = await res.json();
     if (CURRENT_FILE !== file) return;
-    if (data.error) { t.innerHTML = `<div class="empty-note">Error: ${esc(data.error)}</div>`; return; }
+    if (data.error) { t.replaceChildren(el("div", { class: "empty-note" }, "Error: " + data.error)); return; }
     const rendered = await renderTranscript(data);
     if (rendered && CURRENT_FILE === file) LAST_RENDERED_MTIME = sessionMtime(file);
   } catch (e) {
-    t.innerHTML = `<div class="empty-note">Failed to load: ${esc(String(e))}</div>`;
+    t.replaceChildren(el("div", { class: "empty-note" }, "Failed to load: " + String(e)));
   }
 }
 
 let RENDER_GENERATION = 0;
 
+// opts.live: a refresh of the open transcript. It renders into a detached
+// container and swaps in all at once, so the reader never sees the transcript
+// blank out and rebuild over several frames.
 function renderTranscript(data, opts = {}) {
-  const t = $("#transcript");
+  const live = $("#transcript");
+  const t = opts.live ? document.createElement("div") : live;
   t.innerHTML = "";
   CURRENT_AGENT = data.agent || "claude";
   LAST_RENDERED_TITLE = data.title || "";
@@ -950,6 +1169,9 @@ function renderTranscript(data, opts = {}) {
   // Parsed sessions carry no path of their own; the id we loaded them by is one
   // (except for the synthetic Cursor database schemes).
   const transcriptFile = data.file || CURRENT_FILE;
+  // Mica: a 🔒 beside "Jump to end" when the transcript matches its capture,
+  // or a banner below the (sticky) header when there's something to report.
+  const mica = !STANDALONE && MICA_STATUS.enabled ? micaBanner(data, transcriptFile) : null;
   const header = el(
     "div",
     { class: "t-header" },
@@ -959,16 +1181,10 @@ function renderTranscript(data, opts = {}) {
       el(
         "h1",
         { class: "t-title" },
-        el("span", { class: "agent-tag agent-" + data.agent }, agentLabel(data.agent)),
-        data.is_subagent
-          ? el("span", { class: "sidechain-tag" }, data.subagent_type === "guardian" ? "guardian" : "sub-agent")
-          : null,
-        data.cursor_source && String(data.cursor_source).startsWith("cli") && !data.is_subagent
-          ? el("span", { class: "sidechain-tag", title: "Cursor CLI agent transcript" }, "CLI")
-          : null,
+        ...agentTags(data),
         " " + (data.title || "(untitled session)")
       ),
-      el("button", {
+      STANDALONE ? null : el("button", {
         class: "rename-btn",
         title: "Rename transcript",
         "aria-label": "Rename transcript",
@@ -978,8 +1194,8 @@ function renderTranscript(data, opts = {}) {
     data.custom_title && data.original_title
       ? el("div", { class: "t-aititle", title: "Title derived from the transcript" }, "Original title: " + data.original_title)
       : null,
-    // The agent's own AI-generated session title (Claude Code's /resume label),
-    // shown as a muted subtitle when present and not identical to the prompt title.
+    // The agent's own AI-generated session title, shown as a muted subtitle
+    // when present and not identical to the prompt-derived title.
     data.ai_title && data.ai_title !== data.original_title
       ? el("div", { class: "t-aititle", title: "AI-generated session title" }, "Short title: " + data.ai_title)
       : null,
@@ -987,19 +1203,22 @@ function renderTranscript(data, opts = {}) {
       "div",
       { class: "t-meta" },
       data.is_subagent && data.parent_file
-        ? el(
-            "a",
-            {
-              class: "parent-link",
-              href: "#",
-              onclick: (e) => { e.preventDefault(); openSession(data.parent_file); },
-            },
-            "↑ parent session"
-          )
+        ? (STANDALONE
+            ? el("span", { class: "parent-link", title: "The parent session is not part of this export" },
+                "↑ parent session")
+            : el(
+                "a",
+                {
+                  class: "parent-link",
+                  href: "#",
+                  onclick: (e) => { e.preventDefault(); openSession(data.parent_file); },
+                },
+                "↑ parent session"
+              ))
         : null,
       // Cross-session fork: link back to the session this one branched from.
       data.forked_from
-        ? (data.forked_from.file
+        ? (data.forked_from.file && !STANDALONE
             ? el(
                 "a",
                 {
@@ -1037,7 +1256,7 @@ function renderTranscript(data, opts = {}) {
       meta.version ? el("span", {}, "v" + meta.version) : null,
       el("span", {}, data.events.length + " events"),
       el("span", { class: "session-id", style: "margin:0", title: "Click to copy", onclick: (e) => copyId(e, data.id) }, "id: " + data.id),
-      hasTranscriptFile(transcriptFile)
+      !STANDALONE && hasTranscriptFile(transcriptFile)
         ? el("button", {
             class: "reveal-btn",
             title: "Show the transcript file in Finder: " + transcriptFile,
@@ -1054,10 +1273,17 @@ function renderTranscript(data, opts = {}) {
       el("button", { class: "btn", onclick: () => setAll(".tool-block", true) }, "Collapse tools"),
       el("button", { class: "btn", onclick: () => setAll(".tool-block", false) }, "Expand tools"),
       el("button", { class: "btn", onclick: copyAll, title: "Copy transcript as plain text" }, "Copy all text"),
-      el("button", { class: "btn", onclick: scrollToEnd }, "⤓ Jump to end")
+      STANDALONE ? null : el("button", {
+        class: "btn",
+        onclick: saveTranscriptHtml,
+        title: "Download this transcript as one self-contained HTML file you can share",
+      }, "Save HTML"),
+      el("button", { class: "btn", onclick: scrollToEnd }, "⤓ Jump to end"),
+      mica ? mica.lock : null
     )
   );
   t.append(header);
+  if (mica) t.append(mica.box);
 
   const events = data.events || [];
   const progressFill = el("div", { class: "render-progress-fill" });
@@ -1073,7 +1299,7 @@ function renderTranscript(data, opts = {}) {
     },
     progressFill
   );
-  if (events.length > 100) t.append(progress);
+  if (events.length > 100 && !opts.live) t.append(progress);
 
   const generation = ++RENDER_GENERATION;
   return new Promise((resolve) => {
@@ -1102,7 +1328,15 @@ function renderTranscript(data, opts = {}) {
       progress.remove();
       decorateMarkdownLinks(t, data);
       groupTurnRuns(t);
-      if (!opts.keepScroll) $("#main").scrollTop = 0;
+      if (opts.live) {
+        // Snapshot at swap time so toggles made while rendering aren't lost.
+        const view = captureView(live);
+        applyExpanded(view, t);
+        live.replaceChildren(...t.childNodes);
+        restoreScroll(view);
+      } else {
+        $("#main").scrollTop = 0;
+      }
       buildOutline();
       resolve(true);
     }
@@ -1149,23 +1383,26 @@ function groupTurnRuns(container) {
 // ---------- live transcript refresh (scroll- and state-preserving) ----------
 // Snapshot what the reader is looking at: scroll offset, whether they're pinned
 // to the bottom (so we can tail-follow), and which collapsible blocks are open.
-function captureView() {
+function captureView(container) {
   const main = $("#main");
   const atBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 40;
   const expanded = {};
   for (const sel of [".thinking-block", ".tool-block", ".status-block", ".instructions-block", ".branch-block"])
-    expanded[sel] = $$(sel).map((n) => !n.classList.contains("collapsed"));
+    expanded[sel] = $$(sel, container).map((n) => !n.classList.contains("collapsed"));
   return { top: main.scrollTop, atBottom, expanded };
 }
 
-// Re-apply a captured view after a full re-render. Existing blocks keep their
-// index (the transcript only grows by appending), so open/closed state sticks;
-// new blocks appended at the end stay collapsed.
-function restoreView(v) {
+// Re-apply captured open/closed state to a freshly rendered container.
+// Existing blocks keep their index (the transcript only grows by appending),
+// so state sticks; new blocks appended at the end stay collapsed.
+function applyExpanded(v, container) {
   for (const sel of Object.keys(v.expanded)) {
-    const nodes = $$(sel);
+    const nodes = $$(sel, container);
     v.expanded[sel].forEach((open, i) => { if (nodes[i]) nodes[i].classList.toggle("collapsed", !open); });
   }
+}
+
+function restoreScroll(v) {
   const main = $("#main");
   main.scrollTop = v.atBottom ? main.scrollHeight : v.top;
 }
@@ -1176,14 +1413,12 @@ async function refreshOpenTranscript(knownMtime = null) {
   if (transcriptRefreshInFlight) return;
   transcriptRefreshInFlight = true;
   const file = CURRENT_FILE;
-  const view = captureView();
   try {
     const res = await fetch("/api/session?file=" + encodeURIComponent(file));
     const data = await res.json();
     if (data.error || CURRENT_FILE !== file) return;
-    const rendered = await renderTranscript(data, { keepScroll: true });
+    const rendered = await renderTranscript(data, { live: true });
     if (rendered && CURRENT_FILE === file) {
-      restoreView(view);
       LAST_RENDERED_MTIME = knownMtime == null ? sessionMtime(file) : knownMtime;
     }
   } catch (e) { /* transient; try again next poll */ }
@@ -1336,9 +1571,18 @@ function turnShell(kind, label, ev, bodyNodes) {
     { class: "turn-head" },
     el("span", {}, label),
     ev.is_sidechain ? el("span", { class: "sidechain-tag" }, "sub-agent") : null,
+    ev.recovered
+      ? el("span", {
+          class: "recovered-tag",
+          title: "Cursor dropped this message from its conversation index during a checkpoint rebuild; recovered from orphaned data — placement in the timeline is approximate.",
+        }, "recovered")
+      : null,
     ev.phase ? el("span", { class: "phase-tag" }, ev.phase) : null,
     ev.status ? el("span", { class: "status-tag" }, ev.status) : null,
-    ev.model ? el("span", { class: "muted", style: "font-weight:400" }, shortModel(ev.model)) : null,
+    // "<synthetic>" is Claude Code's placeholder on machine-written records
+    // (interruptions, API errors) — not a model worth labelling the turn with.
+    ev.model && ev.model !== "<synthetic>"
+      ? el("span", { class: "muted", style: "font-weight:400" }, shortModel(ev.model)) : null,
     el("span", { class: "turn-time" }, fmtTime(ev.ts))
   );
   return el(
@@ -1379,10 +1623,12 @@ function renderAssistant(ev) {
     if (ev.turn_metadata) body.push(renderTurnMetadata(ev.turn_metadata));
     return turnShell("assistant", agentLabel(CURRENT_AGENT), ev, body);
   }
-  // Codex shape (flat text; reasoning/tools are separate events)
+  // Codex shape (flat text; reasoning/tools are separate events). An exported
+  // Cursor/opencode rollout parses as Codex but belongs to the tool it came
+  // from, so name the turn after the session's agent rather than hardcoding it.
   const body = [el("div", { class: "md", html: md(ev.text || "") })];
   if (ev.turn_metadata) body.push(renderTurnMetadata(ev.turn_metadata));
-  return turnShell("assistant", "Codex", ev, body);
+  return turnShell("assistant", agentLabel(CURRENT_AGENT), ev, body);
 }
 
 function renderTurnMetadata(metadata, label = "Turn metadata") {
@@ -1445,48 +1691,43 @@ function renderGuardianDecision(ev) {
   return turnShell("guardian", "Decision", ev, body);
 }
 
-function renderThinking(b) {
-  const hasText = b.text && b.text.trim();
+// Thinking (a block inside a turn) and reasoning (a Codex top-level event)
+// render identically; only the labels and the empty-state sentence differ.
+function thoughtBlock(text, { label, emptyLabel, emptyText, pill }) {
+  const hasText = text && text.trim();
   const block = el("div", { class: "thinking-block collapsed" + (hasText ? "" : " empty") });
-  const head = el(
-    "div",
-    { class: "thinking-head" },
-    el("span", { class: "chev" }, "▼"),
-    el("span", {}, hasText ? "💭 Thinking" : "💭 Thinking (not recorded)")
+  const head = toggleHead(
+    block,
+    "thinking-head",
+    el("span", {}, hasText ? label : emptyLabel),
+    hasText && pill ? el("span", { class: "tool-caller" }, pill) : null
   );
-  head.addEventListener("click", () => block.classList.toggle("collapsed"));
   const body = hasText
-    ? el("div", { class: "thinking-body md", html: md(b.text) })
-    : el(
-        "div",
-        { class: "thinking-body thinking-empty" },
-        "Claude Code doesn't save thinking text to the transcript — only an encrypted signature is stored, so there's nothing to display here."
-      );
+    ? el("div", { class: "thinking-body md", html: md(text) })
+    : el("div", { class: "thinking-body thinking-empty" }, emptyText);
   block.append(head, body);
   return block;
 }
 
+function renderThinking(b) {
+  return thoughtBlock(b.text, {
+    label: "💭 Thinking",
+    emptyLabel: "💭 Thinking (not recorded)",
+    // What's shown is a provider-written summary; the real chain of thought
+    // came back encrypted and is not in the transcript.
+    pill: b.has_encrypted ? "summary · full reasoning encrypted" : "",
+    emptyText: "Claude Code doesn't save thinking text to the transcript — only an encrypted signature is stored, so there's nothing to display here.",
+  });
+}
+
 function renderReasoning(ev) {
-  const hasText = ev.text && ev.text.trim();
-  const block = el("div", { class: "thinking-block collapsed" + (hasText ? "" : " empty") });
-  const head = el(
-    "div",
-    { class: "thinking-head" },
-    el("span", { class: "chev" }, "▼"),
-    el("span", {}, hasText ? "💭 Reasoning summary" : "💭 Reasoning not readable")
-  );
-  head.addEventListener("click", () => block.classList.toggle("collapsed"));
-  const body = hasText
-    ? el("div", { class: "thinking-body md", html: md(ev.text) })
-    : el(
-        "div",
-        { class: "thinking-body thinking-empty" },
-        ev.has_encrypted
-          ? "Codex saved encrypted reasoning content for continuation, not readable reasoning text."
-          : "No reasoning text was recorded."
-      );
-  block.append(head, body);
-  return block;
+  return thoughtBlock(ev.text, {
+    label: "💭 Reasoning summary",
+    emptyLabel: "💭 Reasoning not readable",
+    emptyText: ev.has_encrypted
+      ? "Codex saved encrypted reasoning content for continuation, not readable reasoning text."
+      : "No reasoning text was recorded.",
+  });
 }
 
 // Codex injected system prompt / context (developer instructions, base prompt,
@@ -1595,13 +1836,7 @@ function renderBranch(ev) {
       ? `⑂ ${count} messages on ${groups.length} abandoned branches`
       : `⑂ ${count} message${count === 1 ? "" : "s"} on an abandoned branch`;
   const block = el("div", { class: "branch-block collapsed" });
-  const head = el(
-    "div",
-    { class: "tool-head" },
-    el("span", { class: "chev" }, "▼"),
-    el("span", { class: "tool-name" }, label)
-  );
-  head.addEventListener("click", () => block.classList.toggle("collapsed"));
+  const head = toggleHead(block, "tool-head", el("span", { class: "tool-name" }, label));
   const body = el("div", { class: "tool-body" });
   groups.forEach((g, i) => {
     if (groups.length > 1) body.append(el("div", { class: "tool-section-label" }, "branch " + (i + 1)));
@@ -1616,14 +1851,10 @@ function renderBranch(ev) {
 
 function collapsibleBlock(cls, label, bodyNodes) {
   const block = el("div", { class: cls });
-  const head = el(
-    "div",
-    { class: "tool-head" },
-    el("span", { class: "chev" }, "▼"),
-    el("span", { class: "tool-name" }, label)
+  block.append(
+    toggleHead(block, "tool-head", el("span", { class: "tool-name" }, label)),
+    el("div", { class: "tool-body" }, ...bodyNodes)
   );
-  head.addEventListener("click", () => block.classList.toggle("collapsed"));
-  block.append(head, el("div", { class: "tool-body" }, ...bodyNodes));
   return block;
 }
 
@@ -1663,9 +1894,7 @@ function renderTokens(ev) {
   );
   const extra = ev.context_window ? el("div", { class: "attach-meta", style: "margin-top:8px" }, "context window: " + ev.context_window.toLocaleString()) : null;
   const block = collapsibleBlock("status-block collapsed", "Token usage", [body, extra]);
-  const node = turnShell("tokens", "Usage", ev, [block]);
-  node.classList.add("token-event");
-  return node;
+  return turnShell("tokens", "Usage", ev, [block]);
 }
 
 // ---------- images (Codex) ----------
@@ -1709,16 +1938,14 @@ function renderWebSearch(ev) {
     ? action.queries
     : [ev.query || action.query].filter(Boolean);
   const block = el("div", { class: "tool-block collapsed" });
-  const head = el(
-    "div",
-    { class: "tool-head" },
-    el("span", { class: "chev" }, "▼"),
+  const head = toggleHead(
+    block,
+    "tool-head",
     el("span", { class: "tool-icon" }, "🌐"),
     el("span", { class: "tool-name" }, "web_search"),
     queries.length > 1 ? el("span", { class: "status-tag" }, queries.length + " queries") : null,
     el("span", { class: "tool-summary", title: queries.join("  •  ") }, queries[0] || "(no query recorded)")
   );
-  head.addEventListener("click", () => block.classList.toggle("collapsed"));
 
   const ul = el("ul", { class: "query-list" });
   for (const q of queries) ul.append(el("li", {}, q));
@@ -1745,27 +1972,42 @@ function callerLabel(caller) {
 }
 
 // ---------- tool rendering ----------
+// The disclosure shell both tool renderers share: error styling, the icon/name
+// head with per-source extras, and the body. What goes *in* the body differs
+// per source and stays in the callers.
+function toolShell(name, isErr, headExtras, bodyKids) {
+  const block = el("div", { class: "tool-block collapsed" + (isErr ? " error" : "") });
+  const head = toggleHead(
+    block,
+    "tool-head",
+    el("span", { class: "tool-icon" }, isErr ? "✗" : "🔧"),
+    el("span", { class: "tool-name" }, name),
+    ...headExtras
+  );
+  block.append(head, el("div", { class: "tool-body" }, ...bodyKids));
+  return block;
+}
+
 // Claude Code tool (input formatted client-side; result attached on the block).
 function renderTool(b) {
   const name = b.name || "tool";
   const fmt = formatToolInput(name, b.input || {});
   const isErr = b.result && b.result.is_error;
 
-  const block = el("div", { class: "tool-block collapsed" + (isErr ? " error" : "") });
-  const head = el(
-    "div",
-    { class: "tool-head" },
-    el("span", { class: "chev" }, "▼"),
-    el("span", { class: "tool-icon" }, isErr ? "✗" : "🔧"),
-    el("span", { class: "tool-name" }, name),
-    el("span", { class: "tool-summary", title: fmt.summary }, fmt.summary),
-    callerLabel(b.caller) ? el("span", { class: "tool-caller" }, callerLabel(b.caller)) : null
-  );
-  head.addEventListener("click", () => block.classList.toggle("collapsed"));
-
   const bodyKids = [];
   bodyKids.push(el("div", { class: "tool-section-label" }, "Input"));
   bodyKids.push(fmt.inputNode);
+  // opencode records which session a `task` call spawned, so the sub-agent's
+  // own transcript is one click away rather than a hunt through the sidebar.
+  // An export carries one session, so there is nothing on the other end of it.
+  if (b.child_file && !STANDALONE) {
+    bodyKids.push(
+      el("a", {
+        href: "#", class: "parent-link",
+        onclick: (e) => { e.preventDefault(); openSession(b.child_file); },
+      }, "→ open sub-agent session")
+    );
+  }
   if (b.instructions) {
     bodyKids.push(el("div", { class: "tool-section-label" }, "Skill instructions"));
     bodyKids.push(el("pre", { class: "payload truncatable" }, b.instructions));
@@ -1779,30 +2021,22 @@ function renderTool(b) {
       bodyKids.push(el("div", { class: "tool-section-label" }, isErr ? "Error" : "Result"));
       if (txt) bodyKids.push(el("pre", { class: "payload truncatable" + (isErr ? " result-error" : "") }, txt));
       for (const uri of imgs) bodyKids.push(el("img", { src: uri, class: "tool-image", loading: "lazy" }));
+      for (const note of b.result.image_notes || []) bodyKids.push(el("div", { class: "attach-meta" }, note));
     }
   } else {
     bodyKids.push(el("div", { class: "tool-section-label muted" }, "No result recorded"));
   }
 
-  block.append(head, el("div", { class: "tool-body" }, ...bodyKids));
-  return block;
+  return toolShell(name, isErr, [
+    el("span", { class: "tool-summary", title: fmt.summary }, fmt.summary),
+    callerLabel(b.caller) ? el("span", { class: "tool-caller" }, callerLabel(b.caller)) : null,
+  ], bodyKids);
 }
 
 // Codex tool (top-level event; summary precomputed server-side, result is a dict).
 function renderCodexTool(ev) {
   const name = ev.name || "tool";
   const isErr = ev.result && ev.result.is_error;
-  const block = el("div", { class: "tool-block collapsed" + (isErr ? " error" : "") });
-  const head = el(
-    "div",
-    { class: "tool-head" },
-    el("span", { class: "chev" }, "▼"),
-    el("span", { class: "tool-icon" }, isErr ? "✗" : "🔧"),
-    el("span", { class: "tool-name" }, name),
-    ev.status ? el("span", { class: "status-tag" }, ev.status) : null,
-    el("span", { class: "tool-summary", title: ev.summary || "" }, ev.summary || "")
-  );
-  head.addEventListener("click", () => block.classList.toggle("collapsed"));
 
   const bodyKids = [];
   bodyKids.push(el("div", { class: "tool-section-label" }, "Input"));
@@ -1835,8 +2069,10 @@ function renderCodexTool(ev) {
     bodyKids.push(el("div", { class: "tool-section-label muted" }, "No result recorded"));
   }
 
-  block.append(head, el("div", { class: "tool-body" }, ...bodyKids));
-  return block;
+  return toolShell(name, isErr, [
+    ev.status ? el("span", { class: "status-tag" }, ev.status) : null,
+    el("span", { class: "tool-summary", title: ev.summary || "" }, ev.summary || ""),
+  ], bodyKids);
 }
 
 function preFrom(text, cls = "payload truncatable") {
@@ -1915,7 +2151,7 @@ function formatToolInput(name, input) {
     const node = el("div", {},
       value.description ? el("div", { class: "muted", style: "margin-bottom:4px" }, value.description) : null,
       value.workdir ? el("div", { class: "attach-meta", style: "margin-bottom:6px" }, "cwd: " + value.workdir) : null,
-      preFrom(cmd, "payload"),
+      preFrom(cmd, "payload cmd"),
       value.yield_time_ms ? el("div", { class: "attach-meta", style: "margin-top:6px" }, "yield: " + value.yield_time_ms + "ms") : null
     );
     return { summary: firstLine(cmd), inputNode: node };
@@ -1978,7 +2214,9 @@ function formatToolInput(name, input) {
     const cmd = value.command || "";
     const node = el("div", {},
       value.description ? el("div", { class: "muted", style: "margin-bottom:4px" }, value.description) : null,
-      preFrom(cmd, "payload"),
+      // opencode's bash takes an explicit working directory instead of `cd`.
+      value.workdir ? el("div", { class: "attach-meta", style: "margin-bottom:6px" }, "cwd: " + value.workdir) : null,
+      preFrom(cmd, "payload cmd"),
       value.run_in_background ? el("div", { class: "muted", style: "margin-top:4px" }, "(background)") : null
     );
     return { summary: firstLine(cmd), inputNode: node };
@@ -2049,88 +2287,53 @@ function formatToolInput(name, input) {
   return { summary: typeof value === "string" ? firstLine(value) : oneLineJson(value), inputNode: preFrom(text, "payload truncatable") };
 }
 
-// Compact plain-text rendering of a tool call for "Copy all". Mirrors the
-// per-tool branches in formatToolInput but emits minimal text instead of DOM,
-// dropping redundant wrappers (e.g. Codex exec orchestration `code`) so the
-// copied transcript uses as few tokens as possible.
+// Serialize a rendered tool-input node to plain text. "Copy all" walks the
+// same DOM formatToolInput just built, so copied text can never drift from
+// what the viewer displays (its predecessor was a hand-maintained per-tool
+// text table that silently fell behind the renderer). The vocabulary is the
+// renderer's own: <pre> blocks come out verbatim (diff prefixes included),
+// annotation divs become single lines, list items become bullets, and
+// <details> bodies (e.g. orchestration source) are display-only extras that
+// stay out of the copy to keep it compact.
+function nodeToCopyLines(node, lines) {
+  if (node == null) return;
+  if (typeof node === "string" || node.nodeType === 3) {
+    const t = (typeof node === "string" ? node : node.textContent || "").trim();
+    if (t) lines.push(t);
+    return;
+  }
+  const tag = (node.tagName || "").toLowerCase();
+  if (tag === "details" || tag === "button") return;
+  if (tag === "pre") {
+    // Strip the zero-width space renderPatch uses to keep empty lines visible.
+    const text = (node.textContent || "").replace(/\u200B/g, "");
+    const preLines = text.replace(/\n$/, "").split("\n");
+    // A shell command (the renderer tags it .cmd) keeps its "$ " marker so
+    // copied text still distinguishes the command from its description.
+    if (node.classList && node.classList.contains("cmd") && preLines[0]) {
+      preLines[0] = "$ " + preLines[0];
+    }
+    for (const line of preLines) lines.push(line);
+    return;
+  }
+  if (tag === "li") {
+    const t = (node.textContent || "").trim();
+    if (t) lines.push("- " + t);
+    return;
+  }
+  const cls = node.classList;
+  if (cls && (cls.contains("attach-meta") || cls.contains("muted") || cls.contains("tool-section-label"))) {
+    const t = (node.textContent || "").trim();
+    if (t) lines.push(t);
+    return;
+  }
+  for (const child of node.childNodes || []) nodeToCopyLines(child, lines);
+}
+
 function toolCallToText(name, input) {
-  const n = (name || "").toLowerCase();
-  const v = input == null ? {} : input;
-  const out = [];
-
-  if (n === "exec" && typeof v === "object") {
-    const calls = Array.isArray(v.calls) ? v.calls : [];
-    if (calls.length) {
-      calls.forEach((call) => out.push(...toolCallToText(call.name, call.input)));
-      return out;
-    }
-    if (v.code) { out.push("$ " + v.code); return out; }
-  }
-  if (n === "exec_command" || n === "bash") {
-    const cmd = v.command || v.cmd || "";
-    if (v.description) out.push("# " + v.description);
-    if (v.workdir) out.push("(in " + v.workdir + ")");
-    if (cmd) out.push("$ " + cmd);
-    if (v.run_in_background) out.push("(background)");
-    return out;
-  }
-  if (n === "read") {
-    const extra = [v.offset ? "offset " + v.offset : "", v.limit ? "limit " + v.limit : "", v.pages ? "pages " + v.pages : ""].filter(Boolean).join(", ");
-    out.push("read " + (v.file_path || "") + (extra ? "  (" + extra + ")" : ""));
-    return out;
-  }
-  if (n === "edit") {
-    out.push("edit " + (v.file_path || "") + (v.replace_all ? "  (replace all)" : ""));
-    if (v.patch != null) out.push(String(v.patch));
-    else {
-      if (v.old_string != null) String(v.old_string).split("\n").forEach((l) => out.push("- " + l));
-      if (v.new_string != null) String(v.new_string).split("\n").forEach((l) => out.push("+ " + l));
-    }
-    return out;
-  }
-  if (n === "multiedit") {
-    out.push("multi-edit " + (v.file_path || "") + "  (" + (v.edits || []).length + " edits)");
-    (v.edits || []).forEach((e) => {
-      if (e.old_string != null) String(e.old_string).split("\n").forEach((l) => out.push("- " + l));
-      if (e.new_string != null) String(e.new_string).split("\n").forEach((l) => out.push("+ " + l));
-    });
-    return out;
-  }
-  if (n === "write") {
-    out.push("write " + (v.file_path || ""));
-    if (v.content) out.push(String(v.content));
-    return out;
-  }
-  if (n === "grep" || n === "glob") {
-    const pat = v.pattern || v.query || "";
-    const where = v.path || v.glob || "";
-    out.push(n + " " + pat + (where ? "  in " + where : ""));
-    return out;
-  }
-  if (n === "task" || n === "agent") {
-    const sub = v.subagent_type || v.agentType || "";
-    out.push("task" + (sub ? " [" + sub + "]" : "") + ": " + (v.description || ""));
-    if (v.prompt) out.push(String(v.prompt));
-    return out;
-  }
-  if (n === "todowrite") {
-    (v.todos || []).forEach((td) => out.push("- [" + (td.status || "?") + "] " + (td.content || td.activeForm || "")));
-    return out;
-  }
-  if (n === "webfetch") {
-    out.push("webfetch " + (v.url || ""));
-    if (v.prompt) out.push(String(v.prompt));
-    return out;
-  }
-  if (n === "websearch") {
-    out.push("websearch " + (v.query || v.search_term || ""));
-    return out;
-  }
-  if (n === "delete" && v.path) { out.push("delete " + v.path); return out; }
-
-  // Fallback: compact single-line JSON.
-  out.push(n + " " + JSON.stringify(v));
-  return out;
+  const lines = [];
+  nodeToCopyLines(formatToolInput(name, input).inputNode, lines);
+  return lines;
 }
 
 function firstLine(s) { return (s || "").split("\n")[0].slice(0, 200); }
@@ -2200,11 +2403,329 @@ async function refreshSidebar() {
   markActive();
 }
 
+// ---------- Mica (optional; only shown when a store is configured) ----------
+const MICA_FLAG_LABELS = {
+  truncated: "truncated",
+  rewritten: "rewritten",
+  replaced: "replaced",
+  deleted: "deleted",
+  recreated: "recreated after deletion",
+  unreadable: "access lost",
+};
+// Other events Mica records, shown in each transcript's history.
+const MICA_EVENT_LABELS = {
+  ...MICA_FLAG_LABELS,
+  moved: "moved",
+  inode_changed: "rewritten in place with the same content",
+  readable_again: "access restored",
+  access_lost: "lost access to a transcript folder",
+  access_restored: "access to the folder restored",
+};
+
+function isMicaFlagged(s) {
+  const vt = s.mica;
+  return !!vt && (vt.flags.length > 0 || vt.state === "deleted");
+}
+
+function micaTag(s) {
+  const vt = s.mica;
+  if (!vt) return null;
+  if (vt.copy && vt.state === "deleted") {
+    return el("span", { class: "mica-tag mica-bad", title: "The live transcript was deleted; shown from Mica's capture" }, "deleted");
+  }
+  if (vt.error) return el("span", { class: "mica-tag mica-bad", title: vt.error }, "⚠ capture unreadable");
+  if (vt.copy && !vt.flags.length) {
+    return el("span", { class: "mica-tag mica-info", title: "No live session matches this capture; shown from Mica's copy" }, "Mica copy");
+  }
+  if (!vt.flags.length) return null;
+  const labels = vt.flags.map((f) => MICA_FLAG_LABELS[f] || f);
+  return el("span", { class: "mica-tag mica-bad", title: "Mica recorded: " + labels.join(", ") }, "⚠ " + labels[0]);
+}
+
+function fmtBytes(n) {
+  if (n == null) return "?";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1024 / 1024).toFixed(1) + " MB";
+}
+
+let MICA_STATUS_KEY = "";
+function renderMicaStatus() {
+  const box = $("#mica-status");
+  if (!box) return;
+  const v = MICA_STATUS;
+  if (!v || !v.enabled) {
+    box.hidden = true;
+    return;
+  }
+  const flagged = SESSIONS.filter(isMicaFlagged).length;
+  if (!flagged && FLAGGED_ONLY) {
+    FLAGGED_ONLY = false;
+    renderSidebar($("#search").value);
+  }
+  const busy = v.running && v.cpu_warn;
+  const failures = Object.entries(v.sources || {}).filter(([, src]) => src.ok === false);
+  const incomplete = v.running && failures.length > 0;
+  // Downtime (a reboot, say) isn't shown: Mica re-compares every file when it restarts.
+  const storeEvents = (v.store_events || []).filter((e) => e.type !== "capture_gap");
+  const key = [v.running, v.n_files, flagged, FLAGGED_ONLY, busy && v.cpu_percent,
+    JSON.stringify(failures), v.error, storeEvents.length].join("|");
+  const age = v.heartbeat_age == null ? null : Math.round(v.heartbeat_age);
+  box.title = v.error
+    ? "Mica: " + v.error
+    : incomplete
+    ? "Mica cannot capture: " + failures.map(([name, src]) => `${name}: ${src.error}`).join("; ")
+    : busy
+    ? `Mica is using ${v.cpu_percent}% of one CPU core (it normally uses well under 1%). ` +
+      "Check `python3 -m mica status`; something may be making it work too hard."
+    : v.running
+    ? `Mica at ${v.root} (last heartbeat ${age}s ago)` +
+      (v.cpu_percent != null ? `, ${v.cpu_percent}% CPU` : "")
+    : `No heartbeat from Mica${age == null ? "" : " for " + age + "s"}: transcripts are not being captured right now.`;
+  if (key === MICA_STATUS_KEY) return;
+  MICA_STATUS_KEY = key;
+  box.hidden = false;
+  box.className = "mica-status" + (!v.running || incomplete || v.error ? " mica-down" : busy ? " mica-busy" : "");
+  // replaceChildren (unlike el) would render a null child as the text "null".
+  box.replaceChildren(...[
+    el("span", { class: "mica-dot", "aria-hidden": "true" }),
+    el("span", {}, v.error ? "⚠ Mica store error" : incomplete ? "⚠ Mica capture incomplete"
+      : v.running ? "Mica capturing" : "Mica not running"),
+    busy ? el("span", { class: "mica-cpu" }, `⚠ ${v.cpu_percent}% CPU`) : null,
+    el("span", { class: "mica-count" }, `${v.n_files} captured`),
+    storeEvents.length
+      ? el("span", { class: "mica-count", title: "Recorded by Mica, not tied to one transcript:\n" +
+          storeEvents.map(describeMicaEvent).join("\n") }, `${storeEvents.length} gap${storeEvents.length === 1 ? "" : "s"}`)
+      : null,
+    flagged
+      ? el("button", {
+          class: "mica-flag-btn" + (FLAGGED_ONLY ? " on" : ""),
+          type: "button",
+          title: FLAGGED_ONLY ? "Show every session" : "Show only sessions Mica flagged",
+          onclick: () => {
+            FLAGGED_ONLY = !FLAGGED_ONLY;
+            renderSidebar($("#search").value);
+            markActive();
+            renderMicaStatus();
+          },
+        }, FLAGGED_ONLY ? "Show all" : `⚠ ${flagged} flagged`)
+      : null,
+  ].filter(Boolean));
+}
+
+function micaSig(file) {
+  const s = SESSIONS.find((x) => x.file === file);
+  return JSON.stringify((s && s.mica) || null);
+}
+
+// The banner fills in once /api/mica-compare answers. A live refresh of the
+// same transcript reuses the last answer instead of re-comparing the whole
+// file on every append; a change in Mica's flags for the session (seen
+// by the sidebar poll) triggers a fresh comparison.
+function micaBanner(data, file) {
+  const box = el("div", { class: "mica-banner", hidden: "" });
+  const lock = el("span", { class: "mica-lock", role: "img", hidden: "" }, "🔒");
+  const sig = micaSig(file);
+  if (MICA_COMPARE && MICA_COMPARE.file === file && MICA_COMPARE.sig === sig) {
+    fillMicaBanner(box, lock, MICA_COMPARE.result, data);
+    return { box, lock };
+  }
+  fetch("/api/mica-compare?file=" + encodeURIComponent(file))
+    .then((r) => r.json())
+    .then((result) => {
+      if (result.error) return;
+      MICA_COMPARE = { file, sig, result };
+      if (CURRENT_FILE === file) fillMicaBanner(box, lock, result, data);
+    })
+    .catch(() => {});
+  return { box, lock };
+}
+
+function refreshMicaBanner() {
+  const oldBox = $("#transcript .mica-banner");
+  const oldLock = $("#transcript .mica-lock");
+  if (!oldBox || !oldLock || !CURRENT_DATA) return;
+  MICA_COMPARE = null;
+  const fresh = micaBanner(CURRENT_DATA, CURRENT_FILE);
+  oldBox.replaceWith(fresh.box);
+  oldLock.replaceWith(fresh.lock);
+}
+
+function micaOpenLink(file, label, title) {
+  return el("a", {
+    class: "parent-link", href: "#", title: title || file,
+    onclick: (e) => { e.preventDefault(); openSession(file); },
+  }, label);
+}
+
+function describeMicaEvent(ev) {
+  const d = ev.detail || {};
+  const label = MICA_EVENT_LABELS[ev.type] || ev.type;
+  let extra = "";
+  if (d.from && d.to) extra = ` (${fmtTime(d.from)} – ${fmtTime(d.to)})`;
+  if (d.source) extra += ` (${d.source})`;
+  if (d.path && !ev.key) extra += ` — ${shortPath(d.path)}, never captured`;
+  if (d.error) extra += `: ${d.error}`;
+  if (d.captured_size != null && d.live_size != null) {
+    extra = ` (${fmtBytes(d.captured_size)} captured → ${fmtBytes(d.live_size)} on disk)`;
+  } else if (d.captured_size != null) {
+    extra = ` (${fmtBytes(d.captured_size)} captured)`;
+  }
+  if (d.while_offline) extra += " — while the store daemon was not running";
+  return `${fmtTime(ev.t)} — ${label}${extra}`;
+}
+
+// One diff, as removed (−) and added (+) transcript lines, each shown by
+// who/when plus its readable text (raw JSON on hover). Small diffs start open.
+function micaDiffBlock(title, d, removedLabel, addedLabel) {
+  const total = (d.missing_count || 0) + (d.extra_count || 0);
+  const block = el("div", { class: "mica-diff" + (total > 40 ? " collapsed" : "") });
+  const row = (sign, it) => el("div", { class: "mica-diff-line mica-diff-" + (sign === "−" ? "del" : "add"), title: it.preview },
+    el("span", { class: "mica-diff-sign" }, sign),
+    el("span", { class: "mica-diff-no" }, "line " + it.line),
+    el("span", { class: "mica-diff-meta" },
+      [it.role || it.type, it.subtype, it.timestamp ? fmtTime(it.timestamp) : ""].filter(Boolean).join(" · ")),
+    el("span", { class: "mica-diff-text" }, it.text || it.preview));
+  const more = (shown, count) => count > shown
+    ? el("div", { class: "mica-note" }, `…and ${count - shown} more (open the capture to see everything).`) : null;
+  const missing = d.missing || [], extra = d.extra || [];
+  block.append(
+    toggleHead(block, "mica-diff-head", `${title}: ${d.missing_count} ${removedLabel}, ${d.extra_count} ${addedLabel}`),
+    el("div", { class: "mica-diff-body" },
+      ...missing.map((it) => row("−", it)), more(missing.length, d.missing_count),
+      ...extra.map((it) => row("+", it)), more(extra.length, d.extra_count))
+  );
+  return block;
+}
+
+function fillMicaBanner(box, lock, r, data) {
+  const copy = data.mica_copy;
+  const flags = r.flags || [];
+  const gens = r.generations || [];
+
+  // Nothing to report: just the lock, with the details on hover. Any event
+  // in the transcript's log, even an expected one, gets the full banner.
+  const matches = (r.state === "verified" || r.state === "ahead") && !flags.length && !copy &&
+    !(r.events || []).length;
+  lock.hidden = !matches;
+  if (matches) {
+    const label = "Matches Mica's capture" +
+      (r.state === "ahead" ? " (the newest lines are still being copied)" : "");
+    lock.title = label;
+    lock.setAttribute("aria-label", label);
+  }
+  if (matches || r.state === "untracked") {
+    box.hidden = true;
+    return;
+  }
+
+  const line = (...kids) => el("div", { class: "mica-line" }, ...kids);
+  const kids = [];
+  let tone = flags.length ? "bad" : "ok";
+
+  const deletedEv = (r.events || []).filter((ev) => ev.type === "deleted").pop();
+  switch (r.state) {
+    case "verified":
+    case "ahead":
+      if (!flags.length) {
+        kids.push(line("🔒 Matches Mica's capture" + (r.state === "ahead" ? " (the newest lines are still being copied)." : ".")));
+      } else if (flags.length === 1 && flags[0] === "unreadable") {
+        kids.push(line("The current bytes match Mica's latest capture."));
+      } else if (flags.length === 1 && flags[0] === "recreated") {
+        kids.push(line("⚠ A transcript at this path was deleted, and this file was started afresh afterwards."));
+      } else {
+        kids.push(line("⚠ Mica recorded changes to this transcript after capturing it. The live file matches " +
+          "the latest capture; the content from before the change is preserved in the earlier capture."));
+      }
+      break;
+    case "modified": {
+      tone = "bad";
+      const d = r.diff || {};
+      kids.push(line(
+        `⚠ The live transcript no longer matches Mica's capture: ${d.missing_count} captured line(s) are missing from it and ` +
+        `${d.extra_count} line(s) in it were never captured (first difference at line ${d.first_diff_line}).`
+      ));
+      break;
+    }
+    case "deleted":
+      tone = "bad";
+      kids.push(line(`🗑 The live transcript was deleted${deletedEv ? " at " + fmtTime(deletedEv.t) : ""}. ` +
+        (copy ? "What you're reading is Mica's copy." : "")));
+      break;
+    default:
+      return;
+  }
+
+  if (flags.includes("unreadable")) {
+    // Pair each loss of access with the next recovery to show the gaps.
+    const gaps = [];
+    for (const ev of r.events || []) {
+      if (ev.type === "unreadable") gaps.push({ from: ev.t, to: null });
+      else if (ev.type === "readable_again" && gaps.length && !gaps[gaps.length - 1].to) gaps[gaps.length - 1].to = ev.t;
+    }
+    const spans = gaps.map((g) => fmtTime(g.from) + " – " + (g.to ? fmtTime(g.to) : "now"));
+    kids.push(line("⚠ Mica lost read access to this transcript" + (spans.length ? " (" + spans.join("; ") + ")" : "") +
+      ". Content written and removed during that time would not have been captured."));
+  }
+
+  if (copy) {
+    const gen = gens.find((g) => g.id === copy.generation) || {};
+    kids.push(el("div", { class: "mica-line mica-copy-line", title: copy.original_path },
+      `You're reading Mica capture ${copy.generation} (${fmtBytes(gen.size)}) of ${shortPath(copy.original_path)}` +
+        (copy.close_reason ? `, frozen when the live file was ${copy.close_reason}` : "") + ". ",
+      copy.live && r.path ? micaOpenLink(r.path, "Open the live transcript") : null
+    ));
+  } else if (flags.length && gens.length > 1 && gens[0].file) {
+    kids.push(line(micaOpenLink(gens[0].file, `Open the original capture (${gens[0].id}, ${fmtBytes(gens[0].size)})`)));
+  }
+
+  if (r.recreated_from_file) {
+    kids.push(line("The file was deleted and then recreated at the same path. ",
+      micaOpenLink(r.recreated_from_file, "Open the content captured before the deletion")));
+  }
+
+  if ((r.events || []).length) {
+    kids.push(el("div", { class: "mica-sub" }, "Everything Mica recorded for this transcript:"),
+      el("ul", { class: "mica-list" }, ...r.events.map((ev) => el("li", {}, describeMicaEvent(ev)))));
+  }
+  if (gens.length > 1 || copy) {
+    kids.push(el("div", { class: "mica-sub" }, "Captures:"),
+      el("ul", { class: "mica-list" }, ...gens.map((g) => el("li", {},
+        g.file && !(copy && g.id === copy.generation)
+          ? micaOpenLink(g.file, g.id, "Open this capture")
+          : el("strong", {}, g.id),
+        ` — ${fmtBytes(g.size)}, started ${fmtTime(g.started)} (${g.reason})` +
+          (g.closed ? `, closed ${fmtTime(g.closed)} (${g.close_reason})` : ", current")
+      ))));
+  }
+  // What each recorded change actually did, line by line.
+  for (const ch of r.changes || []) {
+    const label = MICA_FLAG_LABELS[ch.reason] || ch.reason;
+    kids.push(micaDiffBlock(
+      `What changed when it was ${label} (${fmtTime(ch.at)}, ${ch.from} → ${ch.to === "live" ? "live file" : ch.to})`,
+      ch, "removed", "added"));
+  }
+  if (r.state === "modified" && r.diff) {
+    const cur = gens.find((g) => g.id === r.compared_generation);
+    if (cur && cur.file) kids.push(line(micaOpenLink(cur.file, "Open the captured version (" + cur.id + ")")));
+    kids.push(micaDiffBlock("How the live file differs from the capture", r.diff,
+      "captured but missing from the live file", "in the live file but never captured"));
+  }
+  if (r.preexisting && (flags.length || r.state === "modified")) {
+    kids.push(el("div", { class: "mica-note" },
+      `Capture of this file began ${fmtTime(r.first_seen)}, when Mica was installed; changes made before then can't be checked.`));
+  }
+
+  box.className = "mica-banner mica-" + tone;
+  box.hidden = false;
+  box.replaceChildren(...kids.filter(Boolean));
+}
+
 // ---------- live polling (always on) ----------
 // Real transcript files get a fast, tiny stat request. The full session list
 // remains on a slower loop for sidebar changes and synthetic Cursor sessions.
 function supportsFastTranscriptPoll(file) {
-  return file && !file.startsWith("cursordb:") && !file.startsWith("cursorcli:");
+  return !!file && !SYNTHETIC_ID_RE.test(file);
 }
 
 let transcriptStatePolling = false;
@@ -2231,14 +2752,24 @@ async function pollSidebar() {
     let next;
     try {
       const res = await fetch("/api/sessions");
-      next = (await res.json()).sessions || [];
+      const body = await res.json();
+      next = body.sessions || [];
+      MICA_STATUS = body.mica || { enabled: false };
+      renderSetupBanner(body.setup);
     } catch (e) { return; } // server momentarily unreachable; retry next tick
     const sig = sessionsSignature(next);
     if (sig !== LAST_SIG) {
       LAST_SIG = sig;
       SESSIONS = next;
+      // A session in a new project or on a new model must show up in the
+      // Model/Directory dropdowns without a page reload.
+      if (filterOptionsSignature() !== FILTER_OPTIONS_SIG) buildFilters();
       await refreshSidebar();
+      // The store flagged (or cleared) the open transcript: redo its banner.
+      if (CURRENT_FILE && MICA_COMPARE && MICA_COMPARE.file === CURRENT_FILE &&
+          MICA_COMPARE.sig !== micaSig(CURRENT_FILE)) refreshMicaBanner();
     }
+    renderMicaStatus();
     // Synthetic Cursor sessions have no standalone file to stat, so retain
     // mtime detection here. Title changes for every source also flow here.
     if (CURRENT_FILE) {
@@ -2253,11 +2784,13 @@ async function pollSidebar() {
     sidebarPolling = false;
   }
 }
-setInterval(pollOpenTranscript, TRANSCRIPT_POLL_MS);
-setInterval(pollSidebar, SIDEBAR_POLL_MS);
+if (!STANDALONE) {
+  setInterval(pollOpenTranscript, TRANSCRIPT_POLL_MS);
+  setInterval(pollSidebar, SIDEBAR_POLL_MS);
+}
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "/" && document.activeElement !== $("#search")) {
+  if (e.key === "/" && !STANDALONE && document.activeElement !== $("#search")) {
     e.preventDefault();
     $("#search").focus();
   }
@@ -2305,8 +2838,19 @@ window.addEventListener("hashchange", () => {
   if (file && file !== CURRENT_FILE) openSession(file);
 });
 
+// A saved export already holds its one session, so there is nothing to fetch
+// and nothing to list: render straight from the embedded payload.
+function startStandalone() {
+  document.body.classList.add("standalone");
+  CURRENT_FILE = EXPORT_DATA.file || null;
+  $("#welcome").hidden = true;
+  $("#transcript").hidden = false;
+  renderTranscript(EXPORT_DATA);
+}
+
 buildThemePicker();
-loadSessions().then(openFromHash);
+if (STANDALONE) startStandalone();
+else loadSessions().then(openFromHash);
 
 // ---------- Method-trajectories report tab ----------
 // A configured markdown file (server --report) shown as a second top-level view.
@@ -2316,7 +2860,7 @@ loadSessions().then(openFromHash);
   const tabTranscripts = $('[data-view="transcripts"]');
   const tabReport = $('[data-view="report"]');
   const reportEl = $("#report");
-  if (!tabTranscripts || !tabReport || !reportEl) return;
+  if (STANDALONE || !tabTranscripts || !tabReport || !reportEl) return;
   let markdown = null, rendered = false;
 
   function setView(view) {

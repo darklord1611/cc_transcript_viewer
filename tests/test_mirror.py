@@ -8,7 +8,7 @@ from pathlib import Path
 import claude_parser as claude
 import mirror
 import server
-from test_fixtures import _write_fixture_session
+from tests.fixture_builders import _write_fixture_session
 
 
 def _make_pod(mirror_dir: Path, pod_id: str, team: str, prompt: str) -> Path:
